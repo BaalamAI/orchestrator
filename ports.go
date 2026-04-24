@@ -16,12 +16,16 @@ type StateStore interface {
 	State() map[string]any
 	// SetState sets a single key in the state.
 	SetState(key string, value any)
+	// DeleteState removes a single key from the state.
+	DeleteState(key string)
 	// HasFlag returns a boolean flag from the state.
 	HasFlag(key string) bool
 	// Messages returns the conversation history.
 	Messages() []Message
 	// AddMessage appends a message to the conversation history and persists.
 	AddMessage(role, text string) error
+	// Restore replaces state and message history from a checkpoint snapshot.
+	Restore(state map[string]any, messages []Message) error
 	// Save persists the current state.
 	Save() error
 }

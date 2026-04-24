@@ -54,7 +54,12 @@ func (e *Engine) Run(ctx context.Context, store StateStore, turn *Turn) (*Pipeli
 
 	// 3. Resume from checkpoint if one exists — otherwise record the user message.
 	result := &PipelineResult{}
-	ls, resumed := e.loadOrInit(ctx, turn, result, span)
+	ls, resumed, err := e.loadOrInit(ctx, store, turn, result, span)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "checkpoint restore")
+		return nil, fmt.Errorf("restore checkpoint: %w", err)
+	}
 	if !resumed {
 		if err := store.AddMessage("user", turn.Text); err != nil {
 			span.RecordError(err)
@@ -106,24 +111,24 @@ func (e *Engine) Run(ctx context.Context, store StateStore, turn *Turn) (*Pipeli
 // loadOrInit returns the loopState for this turn. On resume it rehydrates from
 // a checkpoint; otherwise it initializes a fresh state. The resumed bool signals
 // to callers that AddMessage should be skipped.
-func (e *Engine) loadOrInit(ctx context.Context, turn *Turn, result *PipelineResult, span trace.Span) (*loopState, bool) {
+func (e *Engine) loadOrInit(ctx context.Context, store StateStore, turn *Turn, result *PipelineResult, span trace.Span) (*loopState, bool, error) {
 	ls := &loopState{
 		ledger:        newErrorLedger(e.classifier),
 		sharedContext: make(map[string]any),
 	}
 	if e.checkpoints == nil || turn.TurnID == "" {
-		return ls, false
+		return ls, false, nil
 	}
 
 	ckpt, err := e.checkpoints.Load(ctx, turn.TurnID)
 	if err != nil {
 		e.logWarn(ctx, "checkpoint load failed", "turn_id", turn.TurnID, "error", err)
 		e.instruments.checkpoint.Add(ctx, 1, metric.WithAttributes(attribute.String("event", "error")))
-		return ls, false
+		return ls, false, nil
 	}
 	if ckpt == nil {
 		e.instruments.checkpoint.Add(ctx, 1, metric.WithAttributes(attribute.String("event", "miss")))
-		return ls, false
+		return ls, false, nil
 	}
 
 	ls.phase = ckpt.Phase
@@ -137,6 +142,10 @@ func (e *Engine) loadOrInit(ctx context.Context, turn *Turn, result *PipelineRes
 		u := *ckpt.Usage
 		result.Usage = &u
 	}
+	if err := store.Restore(ckpt.State, ckpt.Messages); err != nil {
+		e.instruments.checkpoint.Add(ctx, 1, metric.WithAttributes(attribute.String("event", "error")))
+		return nil, false, err
+	}
 
 	span.SetAttributes(
 		attribute.Bool("resumed", true),
@@ -145,5 +154,5 @@ func (e *Engine) loadOrInit(ctx context.Context, turn *Turn, result *PipelineRes
 	)
 	e.instruments.checkpoint.Add(ctx, 1, metric.WithAttributes(attribute.String("event", "resume")))
 	e.logInfo(ctx, "resumed from checkpoint", "turn_id", turn.TurnID, "step", ckpt.Step, "phase", ckpt.Phase)
-	return ls, true
+	return ls, true, nil
 }

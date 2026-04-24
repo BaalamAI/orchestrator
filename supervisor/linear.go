@@ -11,7 +11,6 @@ import (
 // time the current one emits EventPhaseComplete.
 type Linear struct {
 	phases []orchestrator.Phase
-	index  int
 }
 
 // NewLinear creates a supervisor that steps through phases in order.
@@ -31,13 +30,19 @@ func (s *Linear) DecideNextStep(_ context.Context, _ orchestrator.StateStore, _ 
 	}
 
 	if currentPhase == "" {
-		s.index = 0
 		return s.phases[0], "Linear: starting first phase", nil
 	}
 
-	if lastEvent == orchestrator.EventPhaseComplete && s.index < len(s.phases)-1 {
-		s.index++
-		return s.phases[s.index], fmt.Sprintf("Linear: advancing to phase %d", s.index), nil
+	if lastEvent == orchestrator.EventPhaseComplete {
+		for i, phase := range s.phases {
+			if phase != currentPhase {
+				continue
+			}
+			if i < len(s.phases)-1 {
+				return s.phases[i+1], fmt.Sprintf("Linear: advancing to phase %d", i+1), nil
+			}
+			break
+		}
 	}
 
 	return currentPhase, "Linear: continuing current phase", nil

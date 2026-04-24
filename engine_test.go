@@ -468,3 +468,36 @@ func TestStateDelta_Merge(t *testing.T) {
 		t.Errorf("expected 2 deletes, got %d", len(d1.Deletes))
 	}
 }
+
+func TestEngine_StateDeletesApplied(t *testing.T) {
+	node := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
+		return &orch.NodeResult{
+			Event: orch.EventWaitUser,
+			Delta: orch.StateDelta{
+				Deletes: []string{"remove_me"},
+			},
+		}, nil
+	}
+
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{DefaultPhase: "a"}).
+		RegisterNode("a", node).
+		MustBuild()
+
+	store := store.NewMemory()
+	store.SetState("remove_me", "gone")
+	store.SetState("keep_me", "still-here")
+
+	_, err := engine.Run(context.Background(), store, orch.NewTurn("c1", "hi"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	state := store.State()
+	if _, ok := state["remove_me"]; ok {
+		t.Fatal("expected remove_me to be deleted from state")
+	}
+	if state["keep_me"] != "still-here" {
+		t.Fatalf("expected keep_me preserved, got %v", state["keep_me"])
+	}
+}

@@ -131,15 +131,32 @@ func (s *StateMachine) DecideNextStep(ctx context.Context, store orchestrator.St
 }
 
 // ValidatePhases implements orchestrator.SupervisorValidator. It checks that
-// every phase referenced by a transition or conditional transition has a
-// registered node; the builder calls this during Build().
+// every phase referenced by the state machine has a registered node; the
+// builder calls this during Build().
 func (s *StateMachine) ValidatePhases(hasPhase func(string) bool) error {
+	if s.DefaultPhase == "" {
+		return fmt.Errorf("state machine default phase is required")
+	}
+	if !hasPhase(s.DefaultPhase) {
+		return fmt.Errorf("default phase %q has no registered agent", s.DefaultPhase)
+	}
+	for _, rule := range s.FlagRules {
+		if !hasPhase(rule.Phase) {
+			return fmt.Errorf("flag rule target phase %q has no registered agent", rule.Phase)
+		}
+	}
 	for _, t := range s.Transitions {
+		if !hasPhase(t.From) {
+			return fmt.Errorf("transition source phase %q has no registered agent", t.From)
+		}
 		if !hasPhase(t.To) {
 			return fmt.Errorf("transition target phase %q has no registered agent", t.To)
 		}
 	}
 	for _, ct := range s.ConditionalTransitions {
+		if !hasPhase(ct.From) {
+			return fmt.Errorf("conditional transition source phase %q has no registered agent", ct.From)
+		}
 		if !hasPhase(ct.To) {
 			return fmt.Errorf("conditional transition target phase %q has no registered agent", ct.To)
 		}

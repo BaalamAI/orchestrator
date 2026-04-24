@@ -77,6 +77,46 @@ func TestBuilder_StateMachine_MissingConditionalTarget(t *testing.T) {
 	}
 }
 
+func TestBuilder_StateMachine_MissingDefaultPhaseTarget(t *testing.T) {
+	_, err := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{
+			DefaultPhase: "missing",
+		}).
+		RegisterNode("a", dummyNode("ok", orch.EventWaitUser)).
+		Build()
+	if err == nil {
+		t.Error("expected error for missing default phase")
+	}
+}
+
+func TestBuilder_StateMachine_MissingFlagRuleTarget(t *testing.T) {
+	_, err := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{
+			DefaultPhase: "a",
+			FlagRules: []supervisor.FlagRule{
+				{Flag: "go_missing", Phase: "missing"},
+			},
+		}).
+		RegisterNode("a", dummyNode("ok", orch.EventWaitUser)).
+		Build()
+	if err == nil {
+		t.Error("expected error for missing flag rule target")
+	}
+}
+
+func TestBuilder_StateMachine_MissingTransitionSource(t *testing.T) {
+	_, err := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{
+			DefaultPhase: "a",
+			Transitions:  []supervisor.TransitionRule{{From: "missing", To: "a"}},
+		}).
+		RegisterNode("a", dummyNode("ok", orch.EventWaitUser)).
+		Build()
+	if err == nil {
+		t.Error("expected error for missing transition source")
+	}
+}
+
 func TestBuilder_LinearSupervisor_MissingPhase(t *testing.T) {
 	_, err := orch.NewPipelineBuilder().
 		WithSupervisor(supervisor.NewLinear("a", "b")).

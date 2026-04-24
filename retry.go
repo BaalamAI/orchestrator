@@ -133,7 +133,7 @@ func (e *Engine) commitNode(ctx context.Context, store StateStore, turn *Turn, p
 // state mutations until after all concurrent phases complete.
 func (e *Engine) computeNode(ctx context.Context, store StateStore, turn *Turn, phase Phase, entry registeredNode, sharedCtx map[string]any) (*NodeResult, error) {
 	snapshot := NewSnapshot(store)
-	input := &NodeInput{Extra: make(map[string]any), SharedContext: sharedCtx}
+	input := &NodeInput{Extra: make(map[string]any), SharedContext: cloneStringAnyMap(sharedCtx)}
 
 	// Inject tracer + meter so NewToolLoopNode closures can emit spans/metrics.
 	ctx = obs.WithObservability(ctx, e.toolLoopObservability())
@@ -175,11 +175,22 @@ func (e *Engine) commitDelta(ctx context.Context, store StateStore, phase string
 		}
 	}
 	for _, k := range delta.Deletes {
-		store.SetState(k, nil)
+		store.DeleteState(k)
 	}
 	if delta.Updates != nil || len(delta.Deletes) > 0 {
 		if err := store.Save(); err != nil {
 			e.logError(ctx, "Checkpoint save error after node", "phase", phase, "error", err)
 		}
 	}
+}
+
+func cloneStringAnyMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	cp := make(map[string]any, len(src))
+	for k, v := range src {
+		cp[k] = v
+	}
+	return cp
 }

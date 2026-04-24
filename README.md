@@ -301,16 +301,15 @@ El middleware de RAG llenó `input.RAGContext` automáticamente antes de que el 
 Si tu agente falla (por ejemplo, el LLM no responde), el framework puede reintentar automáticamente:
 
 ```go
-cfg := orchestrator.PipelineConfig{
-    MaxSteps:   3,
-    Supervisor: supervisor.NewLinear("diagnostico", "respuesta"),
-    Retry: orchestrator.RetryPolicy{
-        MaxAttempts: 3,  // intenta hasta 3 veces
-    },
-    Nodes: []orchestrator.NodeConfig{
-        // ...
-    },
-}
+engine := orchestrator.NewPipelineBuilder().
+    WithSupervisor(supervisor.NewLinear("diagnostico", "respuesta")).
+    MaxSteps(3).
+    WithRetry(orchestrator.RetryPolicy{
+        MaxAttempts: 3, // intenta hasta 3 veces
+    }).
+    RegisterNode("diagnostico", diagnosticoNode).
+    RegisterNode("respuesta", respuestaNode).
+    MustBuild()
 ```
 
 Los errores se clasifican en categorías:
@@ -332,7 +331,7 @@ cfg := orchestrator.PipelineConfig{
 ```
 
 Cuando el usuario vuelve con el mismo `TurnID`, el engine:
-1. Restaura el estado (fase actual, mensajes, tokens gastados)
+1. Restaura el estado y el historial de mensajes del checkpoint
 2. No vuelve a guardar el mensaje del usuario (ya está)
 3. Continúa desde donde quedó
 

@@ -3,6 +3,8 @@ package store
 import (
 	"sync"
 	"testing"
+
+	"github.com/baalamai/orchestrator"
 )
 
 func TestMemoryInitialState(t *testing.T) {
@@ -110,6 +112,49 @@ func TestMemorySave(t *testing.T) {
 	ms := NewMemory()
 	if err := ms.Save(); err != nil {
 		t.Errorf("Save should be no-op, got error: %v", err)
+	}
+}
+
+func TestMemoryDeleteState(t *testing.T) {
+	ms := NewMemory()
+	ms.SetState("keep", "v")
+	ms.SetState("drop", "x")
+
+	ms.DeleteState("drop")
+
+	state := ms.State()
+	if _, ok := state["drop"]; ok {
+		t.Fatal("expected drop key to be removed")
+	}
+	if state["keep"] != "v" {
+		t.Fatalf("expected keep key to remain, got %v", state["keep"])
+	}
+}
+
+func TestMemoryRestore(t *testing.T) {
+	ms := NewMemory()
+	ms.SetState("old", "value")
+	_ = ms.AddMessage("user", "old")
+
+	err := ms.Restore(
+		map[string]any{"new": 42},
+		[]orchestrator.Message{{Role: "user", Text: "restored"}},
+	)
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	state := ms.State()
+	if _, ok := state["old"]; ok {
+		t.Fatal("expected old state to be replaced")
+	}
+	if state["new"] != 42 {
+		t.Fatalf("expected restored state, got %v", state["new"])
+	}
+
+	msgs := ms.Messages()
+	if len(msgs) != 1 || msgs[0].Text != "restored" {
+		t.Fatalf("expected restored messages, got %+v", msgs)
 	}
 }
 

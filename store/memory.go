@@ -43,6 +43,13 @@ func (m *Memory) SetState(key string, value any) {
 	m.state[key] = value
 }
 
+// DeleteState removes a key from the state map.
+func (m *Memory) DeleteState(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.state, key)
+}
+
 // HasFlag returns true if key exists and its value is bool(true).
 func (m *Memory) HasFlag(key string) bool {
 	m.mu.Lock()
@@ -69,6 +76,30 @@ func (m *Memory) AddMessage(role, text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, orchestrator.Message{Role: role, Text: text})
+	return nil
+}
+
+// Restore replaces state and messages with checkpointed copies.
+func (m *Memory) Restore(state map[string]any, messages []orchestrator.Message) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if state == nil {
+		m.state = make(map[string]any)
+	} else {
+		m.state = make(map[string]any, len(state))
+		for k, v := range state {
+			m.state[k] = v
+		}
+	}
+
+	if messages == nil {
+		m.messages = nil
+	} else {
+		m.messages = make([]orchestrator.Message, len(messages))
+		copy(m.messages, messages)
+	}
+
 	return nil
 }
 

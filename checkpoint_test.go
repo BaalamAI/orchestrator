@@ -138,6 +138,8 @@ func TestEngine_ResumeFromCheckpoint(t *testing.T) {
 		Step:          1,
 		Phase:         "a",
 		LastEvent:     orch.EventPhaseComplete,
+		State:         map[string]any{"restored_flag": true},
+		Messages:      []orch.Message{{Role: "user", Text: "hi"}},
 		SharedContext: map[string]any{"from_a": "v"},
 	}
 	if err := ckStore.Save(context.Background(), preCrash); err != nil {
@@ -150,11 +152,18 @@ func TestEngine_ResumeFromCheckpoint(t *testing.T) {
 		aCalls++
 		return &orch.NodeResult{Event: orch.EventPhaseComplete, Answer: "from a"}, nil
 	}
-	b := func(_ context.Context, _ orch.StateView, _ *orch.Turn, input *orch.NodeInput) (*orch.NodeResult, error) {
+	b := func(_ context.Context, view orch.StateView, _ *orch.Turn, input *orch.NodeInput) (*orch.NodeResult, error) {
 		bCalls++
 		// Assert SharedContext was restored from checkpoint.
 		if v, _ := input.SharedContext["from_a"].(string); v != "v" {
 			t.Errorf("expected shared context restored, got %v", input.SharedContext)
+		}
+		if !view.GetBool("restored_flag") {
+			t.Error("expected checkpoint state restored into store snapshot")
+		}
+		msgs := view.Messages()
+		if len(msgs) != 1 || msgs[0].Role != "user" || msgs[0].Text != "hi" {
+			t.Errorf("expected checkpoint messages restored, got %+v", msgs)
 		}
 		return &orch.NodeResult{Event: orch.EventWaitUser, Answer: "from b"}, nil
 	}
@@ -174,8 +183,6 @@ func TestEngine_ResumeFromCheckpoint(t *testing.T) {
 	turn.TurnID = "t-resume"
 
 	store := store.NewMemory()
-	// Simulate that pre-crash already added the user message.
-	_ = store.AddMessage("user", "hi")
 
 	result, err := engine.Run(context.Background(), store, turn)
 	if err != nil {
@@ -190,8 +197,7 @@ func TestEngine_ResumeFromCheckpoint(t *testing.T) {
 	if bCalls != 1 {
 		t.Errorf("phase b must run exactly once; got %d calls", bCalls)
 	}
-	// Resume must not re-add the user message. Engine doesn't add assistant messages
-	// either (that's a postprocess hook responsibility), so total stays at 1.
+	// Resume must restore the user message from the checkpoint without re-adding it.
 	userCount := 0
 	for _, m := range store.Messages() {
 		if m.Role == "user" {
@@ -200,6 +206,9 @@ func TestEngine_ResumeFromCheckpoint(t *testing.T) {
 	}
 	if userCount != 1 {
 		t.Errorf("resume must not duplicate user message; got %d user messages", userCount)
+	}
+	if !store.HasFlag("restored_flag") {
+		t.Error("expected checkpoint state restored into backing store")
 	}
 
 	// Success → checkpoint cleared.
@@ -216,6 +225,9 @@ func TestEngine_ResumeDoesNotReAddUserMessage(t *testing.T) {
 	ckStore := store.NewMemoryCheckpoint()
 	_ = ckStore.Save(context.Background(), &orch.Checkpoint{
 		TurnID: "t", Step: 1, Phase: "p", LastEvent: orch.EventWaitUser,
+		Messages: []orch.Message{
+			{Role: "user", Text: "original user message"},
+		},
 	})
 
 	preprocessCalls := 0
@@ -234,8 +246,6 @@ func TestEngine_ResumeDoesNotReAddUserMessage(t *testing.T) {
 	turn.TurnID = "t"
 
 	store := store.NewMemory()
-	// Simulate the pre-crash AddMessage already happened.
-	_ = store.AddMessage("user", "original user message")
 
 	_, err := engine.Run(context.Background(), store, turn)
 	if err != nil {

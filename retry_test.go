@@ -257,3 +257,38 @@ func TestEngine_ParallelExecution_ConcurrentNodes(t *testing.T) {
 		}
 	}
 }
+
+func TestEngine_ParallelExecution_SharedContextIsIsolatedPerNode(t *testing.T) {
+	started := make(chan struct{})
+	errSeen := make(chan error, 1)
+
+	mutator := func(_ context.Context, _ orch.StateView, _ *orch.Turn, input *orch.NodeInput) (*orch.NodeResult, error) {
+		input.SharedContext["poison"] = true
+		close(started)
+		return &orch.NodeResult{Event: orch.EventStepSuccess}, nil
+	}
+	observer := func(_ context.Context, _ orch.StateView, _ *orch.Turn, input *orch.NodeInput) (*orch.NodeResult, error) {
+		<-started
+		if _, ok := input.SharedContext["poison"]; ok {
+			errSeen <- fmt.Errorf("shared context leaked across parallel nodes")
+		}
+		return &orch.NodeResult{Event: orch.EventWaitUser, Answer: "ok"}, nil
+	}
+
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&parallelSupervisor{phases: []orch.Phase{"mutator", "observer"}}).
+		RegisterConcurrentNode("mutator", mutator).
+		RegisterConcurrentNode("observer", observer).
+		MustBuild()
+
+	_, err := engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hi"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case err := <-errSeen:
+		t.Fatal(err)
+	default:
+	}
+}

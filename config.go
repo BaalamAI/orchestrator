@@ -57,7 +57,7 @@ type PipelineConfig struct {
 	// Logger receives structured log output from the engine (info, warn, error).
 	Logger Logger
 	// Classifier maps provider-specific errors to retry categories. Optional;
-	// defaults to noopClassifier (treats every error as permanent).
+	// defaults to noopClassifier (treats every non-nil error as transient).
 	Classifier ErrorClassifier
 	// Cost computes USD cost from usage for MaxCostUSD budget enforcement.
 	// Optional; defaults to noopCostCalculator (always 0).

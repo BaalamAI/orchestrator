@@ -362,3 +362,15 @@ func TestLinear_SinglePhase(t *testing.T) {
 		t.Errorf("expected to stay at only, got %s", phase)
 	}
 }
+
+func TestLinear_DerivesProgressFromCurrentPhase(t *testing.T) {
+	sup := NewLinear("a", "b", "c")
+
+	phase, _, err := sup.DecideNextStep(context.Background(), nil, "", "b", orchestrator.EventPhaseComplete)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if phase != "c" {
+		t.Errorf("expected c from currentPhase=b + phase_complete, got %s", phase)
+	}
+}
