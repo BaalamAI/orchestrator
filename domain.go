@@ -6,55 +6,9 @@ import (
 	"strings"
 )
 
-// ── Domain Ports ─────────────────────────────────────────────────────
-// These interfaces define the core contracts of the orchestrator domain.
-// Implementations live in adapters/ (production) or as test doubles.
-
-// StateStore is the outbound port for state and conversation history persistence.
-// Implementations: MemoryStore (in-memory, for tests) and RedisStateAdapter (production).
-type StateStore interface {
-	// State returns the full state map.
-	State() map[string]any
-	// SetState sets a single key in the state.
-	SetState(key string, value any)
-	// HasFlag returns a boolean flag from the state.
-	HasFlag(key string) bool
-	// Messages returns the conversation history.
-	Messages() []Message
-	// AddMessage appends a message to the conversation history and persists.
-	AddMessage(role, text string) error
-	// Save persists the current state.
-	Save() error
-}
-
-// Supervisor decides which phase to execute next in each iteration of the engine loop.
-// DecideNextStep returns the next phase, a human-readable reason, and an error.
-// Usage returns and clears the accumulated token usage from the last decision.
-type Supervisor interface {
-	DecideNextStep(ctx context.Context, store StateStore, userText string, currentPhase Phase, lastEvent EventType) (Phase, string, error)
-	Usage() *Usage
-}
-
-// ParallelSupervisor is an optional interface that supervisors can implement
-// to return multiple candidate phases for concurrent execution. The engine
-// partitions candidates into concurrent-safe and non-safe groups: safe phases
-// run in parallel, non-safe phases run sequentially afterward.
-// If the supervisor does not implement this interface, the standard single-phase
-// DecideNextStep is used instead.
-type ParallelSupervisor interface {
-	Supervisor
-	DecideNextSteps(ctx context.Context, store StateStore, userText string, currentPhase Phase, lastEvent EventType) ([]Phase, string, error)
-}
-
-// IntentRouter classifies user intent via LLM or rules.
-// Used optionally by StateMachineSupervisor at the start of a turn
-// when no deterministic rules (transitions or flags) match.
-type IntentRouter interface {
-	Route(ctx context.Context, store StateStore, text string) (Phase, error)
-	Usage() *Usage
-}
-
 // ── Domain Types ─────────────────────────────────────────────────────
+// Port interfaces (StateStore, Supervisor, ParallelSupervisor, IntentRouter,
+// ErrorClassifier, CostCalculator, SupervisorValidator) live in ports.go.
 
 // Metadata keys for transient data passed between agents and hooks.
 const (
@@ -288,14 +242,4 @@ type NodeResult struct {
 
 // AgentMiddleware wraps a NodeFunc, enabling pre/post behavior (capture, logging, etc.).
 type AgentMiddleware func(next NodeFunc) NodeFunc
-
-// SupervisorHook runs after each supervisor decision in the execution loop.
-// Errors are logged but do not stop the pipeline.
-type SupervisorHook func(ctx context.Context, store StateStore, turn *Turn, step int, phase Phase, reason string, usage *Usage) error
-
-// PreAgentHook runs before each agent in the execution loop.
-type PreAgentHook func(ctx context.Context, view StateView, turn *Turn, phase string) error
-
-// PostAgentHook runs after each agent in the execution loop.
-type PostAgentHook func(ctx context.Context, view StateView, turn *Turn, result *NodeResult, phase string) error
 

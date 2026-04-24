@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "store",
+    srcs = [
+        "checkpoint.go",
+        "memory.go",
+    ],
+    importpath = "github.com/baalamai/orchestrator/store",
+    visibility = ["//visibility:public"],
+    deps = ["//lib/orchestrator"],
+)
+
+go_test(
+    name = "store_test",
+    srcs = ["memory_test.go"],
+    embed = [":store"],
+)

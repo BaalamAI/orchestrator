@@ -1,19 +1,20 @@
-package orchestrator
+package hook
 
 import (
 	"context"
 	"fmt"
 	"sync"
 
+	"github.com/baalamai/orchestrator"
 	"golang.org/x/sync/errgroup"
 )
 
 // ComposeParallel returns a middleware that executes multiple providers in parallel
 // before calling the next handler. It automatically merges their results into
 // NodeInput, accumulates Usage, and merges Deltas into the final NodeResult.
-func ComposeParallel(providers ...NodeProvider) AgentMiddleware {
-	return func(next NodeFunc) NodeFunc {
-		return func(ctx context.Context, view StateView, turn *Turn, input *NodeInput) (*NodeResult, error) {
+func ComposeParallel(providers ...orchestrator.NodeProvider) orchestrator.AgentMiddleware {
+	return func(next orchestrator.NodeFunc) orchestrator.NodeFunc {
+		return func(ctx context.Context, view orchestrator.StateView, turn *orchestrator.Turn, input *orchestrator.NodeInput) (*orchestrator.NodeResult, error) {
 			if len(providers) == 0 {
 				return next(ctx, view, turn, input)
 			}
@@ -36,11 +37,9 @@ func ComposeParallel(providers ...NodeProvider) AgentMiddleware {
 	}
 }
 
-// runProvidersParallel fans out providers across goroutines and collects their
-// results positionally. Returns the first error from any provider.
-func runProvidersParallel(ctx context.Context, view StateView, turn *Turn, providers []NodeProvider) ([]*ProviderResult, error) {
+func runProvidersParallel(ctx context.Context, view orchestrator.StateView, turn *orchestrator.Turn, providers []orchestrator.NodeProvider) ([]*orchestrator.ProviderResult, error) {
 	g, gctx := errgroup.WithContext(ctx)
-	results := make([]*ProviderResult, len(providers))
+	results := make([]*orchestrator.ProviderResult, len(providers))
 	var mu sync.Mutex
 
 	for i, p := range providers {
@@ -63,15 +62,13 @@ func runProvidersParallel(ctx context.Context, view StateView, turn *Turn, provi
 	return results, nil
 }
 
-// aggregateProviderResults injects each provider's value into NodeInput and
-// accumulates deltas, usage and metadata across all results.
-func aggregateProviderResults(input *NodeInput, results []*ProviderResult) (StateDelta, Usage, map[string]any) {
+func aggregateProviderResults(input *orchestrator.NodeInput, results []*orchestrator.ProviderResult) (orchestrator.StateDelta, orchestrator.Usage, map[string]any) {
 	if input.Extra == nil {
 		input.Extra = make(map[string]any)
 	}
 
-	var delta StateDelta
-	var usage Usage
+	var delta orchestrator.StateDelta
+	var usage orchestrator.Usage
 	metadata := make(map[string]any)
 
 	for _, res := range results {
@@ -92,9 +89,7 @@ func aggregateProviderResults(input *NodeInput, results []*ProviderResult) (Stat
 	return delta, usage, metadata
 }
 
-// injectProviderValue routes a provider's Value into the specialized NodeInput
-// field (RAGContext, CapturedFields) or falls back to the Extra bag.
-func injectProviderValue(input *NodeInput, res *ProviderResult) {
+func injectProviderValue(input *orchestrator.NodeInput, res *orchestrator.ProviderResult) {
 	switch res.InputKey {
 	case "rag_context":
 		if s, ok := res.Value.(string); ok {
@@ -111,15 +106,12 @@ func injectProviderValue(input *NodeInput, res *ProviderResult) {
 	}
 }
 
-// mergeProviderIntoResult merges accumulated provider delta/usage/metadata into
-// the agent's final result. Existing metadata keys on finalResult win over
-// provider metadata; delta and usage are combined additively.
-func mergeProviderIntoResult(finalResult *NodeResult, delta StateDelta, usage Usage, metadata map[string]any) {
+func mergeProviderIntoResult(finalResult *orchestrator.NodeResult, delta orchestrator.StateDelta, usage orchestrator.Usage, metadata map[string]any) {
 	delta.Merge(&finalResult.Delta)
 	finalResult.Delta = delta
 
 	if finalResult.Usage == nil {
-		finalResult.Usage = &Usage{}
+		finalResult.Usage = &orchestrator.Usage{}
 	}
 	finalResult.Usage.Add(&usage)
 

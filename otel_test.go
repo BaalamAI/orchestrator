@@ -1,4 +1,4 @@
-package orchestrator
+package orchestrator_test
 
 import (
 	"context"
@@ -6,6 +6,10 @@ import (
 
 	"go.opentelemetry.io/otel/metric/noop"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+
+	orch "github.com/baalamai/orchestrator"
+	"github.com/baalamai/orchestrator/store"
+	"github.com/baalamai/orchestrator/supervisor"
 )
 
 // TestEngine_Build_WithExplicitNoopTracerMeter verifies that wiring an explicit
@@ -14,20 +18,20 @@ func TestEngine_Build_WithExplicitNoopTracerMeter(t *testing.T) {
 	tracer := tracenoop.NewTracerProvider().Tracer("test")
 	meter := noop.NewMeterProvider().Meter("test")
 
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{DefaultPhase: "a"}).
-		RegisterNode("a", dummyNode("ok", EventWaitUser)).
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{DefaultPhase: "a"}).
+		RegisterNode("a", dummyNode("ok", orch.EventWaitUser)).
 		WithTracer(tracer).
 		WithMeter(meter).
 		MustBuild()
 
-	if engine.tracer == nil {
+	if !engine.TracerIsSetForTest() {
 		t.Fatal("expected tracer to be set")
 	}
-	if engine.meter == nil {
+	if !engine.MeterIsSetForTest() {
 		t.Fatal("expected meter to be set")
 	}
-	if engine.instruments == nil {
+	if !engine.InstrumentsIsSetForTest() {
 		t.Fatal("expected instruments to be set")
 	}
 }
@@ -36,9 +40,9 @@ func TestEngine_Build_WithExplicitNoopTracerMeter(t *testing.T) {
 // successfully when no tracer/meter are configured (default noop behavior).
 // This is the regression guard — existing callers must keep working.
 func TestEngine_Run_NoopObservability(t *testing.T) {
-	engine := buildSimpleNodeEngine("greet", dummyNode("hi", EventWaitUser))
+	engine := buildSimpleNodeEngine("greet", dummyNode("hi", orch.EventWaitUser))
 
-	result, err := engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "hola"))
+	result, err := engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hola"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,25 +57,25 @@ func TestBuildFromConfig_WithTracerMeter(t *testing.T) {
 	tracer := tracenoop.NewTracerProvider().Tracer("test")
 	meter := noop.NewMeterProvider().Meter("test")
 
-	cfg := PipelineConfig{
+	cfg := orch.PipelineConfig{
 		MaxSteps:   3,
-		Supervisor: &StateMachineSupervisor{DefaultPhase: "a"},
+		Supervisor: &supervisor.StateMachine{DefaultPhase: "a"},
 		Tracer:     tracer,
 		Meter:      meter,
-		Nodes: []NodeConfig{
-			{Phase: "a", Fn: dummyNode("ok", EventWaitUser)},
+		Nodes: []orch.NodeConfig{
+			{Phase: "a", Fn: dummyNode("ok", orch.EventWaitUser)},
 		},
 	}
 
-	engine, err := BuildFromConfig(cfg)
+	engine, err := orch.BuildFromConfig(cfg)
 	if err != nil {
 		t.Fatalf("BuildFromConfig: %v", err)
 	}
-	if engine.tracer == nil || engine.meter == nil || engine.instruments == nil {
+	if !engine.TracerIsSetForTest() || !engine.MeterIsSetForTest() || !engine.InstrumentsIsSetForTest() {
 		t.Fatal("expected tracer/meter/instruments to be wired")
 	}
 
-	result, err := engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "test"))
+	result, err := engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "test"))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -83,27 +87,27 @@ func TestBuildFromConfig_WithTracerMeter(t *testing.T) {
 // TestEngine_Run_UsesInstruments_NoPanic is a smoke test that tokens counter
 // and phase duration histogram don't panic when a node returns Usage with breakdowns.
 func TestEngine_Run_UsesInstruments_NoPanic(t *testing.T) {
-	nodeWithUsage := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
-		return &NodeResult{
-			Event:  EventWaitUser,
+	nodeWithUsage := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
+		return &orch.NodeResult{
+			Event:  orch.EventWaitUser,
 			Answer: "done",
-			Usage: &Usage{
+			Usage: &orch.Usage{
 				PromptTokens:     10,
 				CompletionTokens: 5,
 				TotalTokens:      15,
-				Breakdown: []ModelUsage{
+				Breakdown: []orch.ModelUsage{
 					{Agent: "test", Model: "claude-opus-4-7", Provider: "anthropic", PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 				},
 			},
 		}, nil
 	}
 
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{DefaultPhase: "a"}).
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{DefaultPhase: "a"}).
 		RegisterNode("a", nodeWithUsage).
 		MustBuild()
 
-	result, err := engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "test"))
+	result, err := engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "test"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

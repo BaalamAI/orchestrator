@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "supervisor",
+    srcs = [
+        "linear.go",
+        "statemachine.go",
+    ],
+    importpath = "github.com/baalamai/orchestrator/supervisor",
+    visibility = ["//visibility:public"],
+    deps = ["//lib/orchestrator"],
+)
+
+go_test(
+    name = "supervisor_test",
+    srcs = ["supervisor_test.go"],
+    embed = [":supervisor"],
+    deps = [
+        "//lib/orchestrator",
+        "//lib/orchestrator/store",
+    ],
+)

@@ -1,12 +1,12 @@
-package orchestrator
+package store
 
 import (
 	"sync"
 	"testing"
 )
 
-func TestMemoryStoreInitialState(t *testing.T) {
-	ms := NewMemoryStore()
+func TestMemoryInitialState(t *testing.T) {
+	ms := NewMemory()
 	state := ms.State()
 	if len(state) != 0 {
 		t.Errorf("expected empty state, got %d entries", len(state))
@@ -17,8 +17,8 @@ func TestMemoryStoreInitialState(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreSetState(t *testing.T) {
-	ms := NewMemoryStore()
+func TestMemorySetState(t *testing.T) {
+	ms := NewMemory()
 	ms.SetState("name", "test")
 	ms.SetState("count", 42)
 
@@ -31,8 +31,8 @@ func TestMemoryStoreSetState(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreStateReturnsCopy(t *testing.T) {
-	ms := NewMemoryStore()
+func TestMemoryStateReturnsCopy(t *testing.T) {
+	ms := NewMemory()
 	ms.SetState("key", "original")
 
 	state := ms.State()
@@ -44,8 +44,8 @@ func TestMemoryStoreStateReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreHasFlag(t *testing.T) {
-	ms := NewMemoryStore()
+func TestMemoryHasFlag(t *testing.T) {
+	ms := NewMemory()
 
 	// Missing key
 	if ms.HasFlag("missing") {
@@ -71,8 +71,8 @@ func TestMemoryStoreHasFlag(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreMessages(t *testing.T) {
-	ms := NewMemoryStore()
+func TestMemoryMessages(t *testing.T) {
+	ms := NewMemory()
 
 	if err := ms.AddMessage("user", "hola"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -93,8 +93,8 @@ func TestMemoryStoreMessages(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreMessagesReturnsCopy(t *testing.T) {
-	ms := NewMemoryStore()
+func TestMemoryMessagesReturnsCopy(t *testing.T) {
+	ms := NewMemory()
 	ms.AddMessage("user", "original")
 
 	msgs := ms.Messages()
@@ -106,15 +106,15 @@ func TestMemoryStoreMessagesReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreSave(t *testing.T) {
-	ms := NewMemoryStore()
+func TestMemorySave(t *testing.T) {
+	ms := NewMemory()
 	if err := ms.Save(); err != nil {
 		t.Errorf("Save should be no-op, got error: %v", err)
 	}
 }
 
-func TestMemoryStoreConcurrency(t *testing.T) {
-	ms := NewMemoryStore()
+func TestMemoryConcurrency(t *testing.T) {
+	ms := NewMemory()
 	var wg sync.WaitGroup
 
 	for i := 0; i < 100; i++ {

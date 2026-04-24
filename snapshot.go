@@ -22,7 +22,7 @@ func NewSnapshot(store StateStore) StateView {
 		memory = mp.Memory()
 	}
 	return &stateSnapshot{
-		state:    store.State(),    // State() already returns a copy (MemoryStore & RedisStateAdapter)
+		state:    store.State(),    // State() already returns a copy (store.Memory & RedisStateAdapter)
 		messages: store.Messages(), // Messages() already returns a copy
 		memory:   memory,
 	}

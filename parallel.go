@@ -142,31 +142,3 @@ func eventPriority(e EventType) int {
 	}
 }
 
-// budgetExceeded returns true if the accumulated usage exceeds the given budget.
-func (e *Engine) budgetExceeded(result *PipelineResult, budget BudgetConfig) bool {
-	if result.Usage == nil {
-		return false
-	}
-	if budget.MaxTokens > 0 && result.Usage.TotalTokens >= budget.MaxTokens {
-		return true
-	}
-	if budget.MaxCostUSD > 0 && e.estimateCost(result) >= budget.MaxCostUSD {
-		return true
-	}
-	return false
-}
-
-// estimateCost calculates the accumulated USD cost from per-model breakdowns
-// using the configured CostCalculator. Returns 0 when no calculator is wired
-// (via the default noopCostCalculator) — in that case MaxCostUSD budget limits
-// never trip.
-func (e *Engine) estimateCost(result *PipelineResult) float64 {
-	if result.Usage == nil {
-		return 0
-	}
-	var total float64
-	for _, mu := range result.Usage.Breakdown {
-		total += e.cost.Calculate(mu.Model, int(mu.PromptTokens), int(mu.CompletionTokens))
-	}
-	return total
-}

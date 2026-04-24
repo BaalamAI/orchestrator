@@ -1,20 +1,24 @@
-package orchestrator
+package orchestrator_test
 
 import (
 	"context"
 	"fmt"
 	"testing"
+
+	orch "github.com/baalamai/orchestrator"
+	"github.com/baalamai/orchestrator/store"
+	"github.com/baalamai/orchestrator/supervisor"
 )
 
 func TestEngine_EventWaitUser_BreaksLoop(t *testing.T) {
 	callCount := 0
-	node := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
+	node := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 		callCount++
-		return &NodeResult{Event: EventWaitUser, Answer: "waiting"}, nil
+		return &orch.NodeResult{Event: orch.EventWaitUser, Answer: "waiting"}, nil
 	}
 
 	engine := buildSimpleNodeEngine("a", node)
-	engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "hi"))
+	engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hi"))
 
 	if callCount != 1 {
 		t.Errorf("expected node called once (wait_user breaks), got %d", callCount)
@@ -23,27 +27,27 @@ func TestEngine_EventWaitUser_BreaksLoop(t *testing.T) {
 
 func TestEngine_PhaseComplete_Cascades(t *testing.T) {
 	var phases []string
-	makeNode := func(phase string, event EventType) NodeFunc {
-		return func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
+	makeNode := func(phase string, event orch.EventType) orch.NodeFunc {
+		return func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 			phases = append(phases, phase)
-			return &NodeResult{Event: event, Answer: phase}, nil
+			return &orch.NodeResult{Event: event, Answer: phase}, nil
 		}
 	}
 
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{
 			DefaultPhase: "diagnostic",
-			Transitions: []TransitionRule{
+			Transitions: []supervisor.TransitionRule{
 				{From: "diagnostic", To: "payment"},
 				{From: "payment", To: "complete"},
 			},
 		}).
-		RegisterNode("diagnostic", makeNode("diagnostic", EventPhaseComplete)).
-		RegisterNode("payment", makeNode("payment", EventPhaseComplete)).
-		RegisterNode("complete", makeNode("complete", EventWaitUser)).
+		RegisterNode("diagnostic", makeNode("diagnostic", orch.EventPhaseComplete)).
+		RegisterNode("payment", makeNode("payment", orch.EventPhaseComplete)).
+		RegisterNode("complete", makeNode("complete", orch.EventWaitUser)).
 		MustBuild()
 
-	result, err := engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "hi"))
+	result, err := engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hi"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -64,13 +68,13 @@ func TestEngine_PhaseComplete_Cascades(t *testing.T) {
 
 func TestEngine_AntiStutter_BreaksOnSamePhase(t *testing.T) {
 	callCount := 0
-	node := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
+	node := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 		callCount++
-		return &NodeResult{Event: EventStepSuccess, Answer: "step"}, nil
+		return &orch.NodeResult{Event: orch.EventStepSuccess, Answer: "step"}, nil
 	}
 
 	engine := buildSimpleNodeEngine("a", node)
-	engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "hi"))
+	engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hi"))
 
 	// First call executes, second call supervisor returns same phase with step_success → anti-stutter breaks
 	if callCount != 1 {
@@ -80,22 +84,22 @@ func TestEngine_AntiStutter_BreaksOnSamePhase(t *testing.T) {
 
 func TestEngine_RepeatablePhase_AllowsReentry(t *testing.T) {
 	callCount := 0
-	node := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
+	node := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 		callCount++
 		if callCount >= 3 {
-			return &NodeResult{Event: EventWaitUser, Answer: "done"}, nil
+			return &orch.NodeResult{Event: orch.EventWaitUser, Answer: "done"}, nil
 		}
-		return &NodeResult{Event: EventStepSuccess, Answer: "again"}, nil
+		return &orch.NodeResult{Event: orch.EventStepSuccess, Answer: "again"}, nil
 	}
 
-	engine := NewPipelineBuilder().
+	engine := orch.NewPipelineBuilder().
 		MaxSteps(5).
-		WithSupervisor(&StateMachineSupervisor{DefaultPhase: "chat"}).
+		WithSupervisor(&supervisor.StateMachine{DefaultPhase: "chat"}).
 		RegisterNode("chat", node).
 		Repeatable("chat").
 		MustBuild()
 
-	engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "hi"))
+	engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hi"))
 
 	if callCount != 3 {
 		t.Errorf("expected 3 calls for repeatable phase, got %d", callCount)
@@ -103,28 +107,28 @@ func TestEngine_RepeatablePhase_AllowsReentry(t *testing.T) {
 }
 
 func TestEngine_StateUpdatesApplied(t *testing.T) {
-	node := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
-		return &NodeResult{
-			Event:  EventPhaseComplete,
+	node := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
+		return &orch.NodeResult{
+			Event:  orch.EventPhaseComplete,
 			Answer: "done",
-			Delta: StateDelta{Updates: map[string]any{
+			Delta: orch.StateDelta{Updates: map[string]any{
 				"diagnostic_complete": true,
 				"product":             "herbicida",
 			}},
 		}, nil
 	}
 
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{
 			DefaultPhase: "diagnostic",
-			FlagRules:    []FlagRule{{Flag: "diagnostic_complete", Phase: "payment"}},
+			FlagRules:    []supervisor.FlagRule{{Flag: "diagnostic_complete", Phase: "payment"}},
 		}).
 		RegisterNode("diagnostic", node).
-		RegisterNode("payment", dummyNode("pay", EventWaitUser)).
+		RegisterNode("payment", dummyNode("pay", orch.EventWaitUser)).
 		MustBuild()
 
-	store := NewMemoryStore()
-	engine.Run(context.Background(), store, NewTurn("c1", "hi"))
+	store := store.NewMemory()
+	engine.Run(context.Background(), store, orch.NewTurn("c1", "hi"))
 
 	if !store.HasFlag("diagnostic_complete") {
 		t.Error("expected diagnostic_complete flag set")
@@ -139,28 +143,28 @@ func TestEngine_SharedContext_PassedBetweenPhases(t *testing.T) {
 	// Phase 1 sets shared context; Phase 2 reads it from input.SharedContext
 	var receivedContext map[string]any
 
-	phase1 := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
-		return &NodeResult{
-			Event:         EventPhaseComplete,
+	phase1 := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
+		return &orch.NodeResult{
+			Event:         orch.EventPhaseComplete,
 			Answer:        "phase1",
 			SharedContext: map[string]any{"suggested_model": "premium", "priority": 1},
 		}, nil
 	}
-	phase2 := func(_ context.Context, _ StateView, _ *Turn, input *NodeInput) (*NodeResult, error) {
+	phase2 := func(_ context.Context, _ orch.StateView, _ *orch.Turn, input *orch.NodeInput) (*orch.NodeResult, error) {
 		receivedContext = input.SharedContext
-		return &NodeResult{Event: EventWaitUser, Answer: "phase2"}, nil
+		return &orch.NodeResult{Event: orch.EventWaitUser, Answer: "phase2"}, nil
 	}
 
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{
 			DefaultPhase: "diag",
-			Transitions:  []TransitionRule{{From: "diag", To: "quote"}},
+			Transitions:  []supervisor.TransitionRule{{From: "diag", To: "quote"}},
 		}).
 		RegisterNode("diag", phase1).
 		RegisterNode("quote", phase2).
 		MustBuild()
 
-	engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "hi"))
+	engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hi"))
 
 	if receivedContext == nil {
 		t.Fatal("expected phase2 to receive shared context from phase1")
@@ -175,24 +179,24 @@ func TestEngine_SharedContext_PassedBetweenPhases(t *testing.T) {
 
 func TestEngine_ErrorThreshold_StopsPipeline(t *testing.T) {
 	callCount := 0
-	node := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
+	node := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 		callCount++
 		if callCount <= 2 {
 			return nil, fmt.Errorf("transient error")
 		}
-		return &NodeResult{Event: EventWaitUser, Answer: "ok"}, nil
+		return &orch.NodeResult{Event: orch.EventWaitUser, Answer: "ok"}, nil
 	}
 
-	engine := NewPipelineBuilder().
+	engine := orch.NewPipelineBuilder().
 		MaxSteps(10).
-		WithSupervisor(&StateMachineSupervisor{DefaultPhase: "a"}).
+		WithSupervisor(&supervisor.StateMachine{DefaultPhase: "a"}).
 		RegisterNode("a", node).
 		Repeatable("a").
-		WithRetry(RetryPolicy{MaxAttempts: 5}).
-		WithBudget(BudgetConfig{MaxTransientErrors: 2}).
+		WithRetry(orch.RetryPolicy{MaxAttempts: 5}).
+		WithBudget(orch.BudgetConfig{MaxTransientErrors: 2}).
 		MustBuild()
 
-	result, err := engine.Run(context.Background(), NewMemoryStore(), NewTurn("c1", "hi"))
+	result, err := engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hi"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -203,7 +207,7 @@ func TestEngine_ErrorThreshold_StopsPipeline(t *testing.T) {
 	if result.Metadata == nil {
 		t.Fatal("expected metadata with error ledger")
 	}
-	ledger, ok := result.Metadata[MetaErrorLedger]
+	ledger, ok := result.Metadata[orch.MetaErrorLedger]
 	if !ok {
 		t.Fatal("expected error_ledger in metadata")
 	}
@@ -215,7 +219,7 @@ func TestEngine_ErrorThreshold_StopsPipeline(t *testing.T) {
 		t.Errorf("expected 2 transient errors, got %d", counts["transient"])
 	}
 	// Should have stopped via error threshold
-	if result.Metadata[MetaErrorThreshold] != true {
+	if result.Metadata[orch.MetaErrorThreshold] != true {
 		t.Error("expected error_threshold=true in metadata")
 	}
 }

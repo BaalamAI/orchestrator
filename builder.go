@@ -190,24 +190,12 @@ func (b *PipelineBuilder) Build() (*Engine, error) {
 		return ok
 	}
 
-	// Validate supervisor phases exist in either registry
-	if sm, ok := b.supervisor.(*StateMachineSupervisor); ok {
-		for _, t := range sm.Transitions {
-			if !hasPhase(t.To) {
-				return nil, fmt.Errorf("orchestrator: transition target phase %q has no registered agent", t.To)
-			}
-		}
-		for _, ct := range sm.ConditionalTransitions {
-			if !hasPhase(ct.To) {
-				return nil, fmt.Errorf("orchestrator: conditional transition target phase %q has no registered agent", ct.To)
-			}
-		}
-	}
-	if ls, ok := b.supervisor.(*LinearSupervisor); ok {
-		for _, p := range ls.phases {
-			if !hasPhase(p) {
-				return nil, fmt.Errorf("orchestrator: linear phase %q has no registered agent", p)
-			}
+	// Validate supervisor phases via the optional SupervisorValidator port.
+	// Concrete supervisors in the supervisor/ subpackage implement this;
+	// unknown supervisors are skipped (callers accept phase-mismatch risk).
+	if v, ok := b.supervisor.(SupervisorValidator); ok {
+		if err := v.ValidatePhases(hasPhase); err != nil {
+			return nil, fmt.Errorf("orchestrator: %w", err)
 		}
 	}
 

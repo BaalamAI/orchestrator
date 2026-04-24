@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/baalamai/orchestrator/obs"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -135,7 +136,7 @@ func (e *Engine) computeNode(ctx context.Context, store StateStore, turn *Turn, 
 	input := &NodeInput{Extra: make(map[string]any), SharedContext: sharedCtx}
 
 	// Inject tracer + meter so NewToolLoopNode closures can emit spans/metrics.
-	ctx = withToolLoopObservability(ctx, e.tracer, e.toolLoopMeter())
+	ctx = obs.WithObservability(ctx, e.toolLoopObservability())
 
 	// Pre-agent hooks
 	for _, hook := range e.preAgentHooks {

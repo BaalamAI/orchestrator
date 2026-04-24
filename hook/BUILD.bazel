@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "hook",
+    srcs = [
+        "hook.go",
+        "middleware.go",
+    ],
+    importpath = "github.com/baalamai/orchestrator/hook",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//lib/orchestrator",
+        "@org_golang_x_sync//errgroup",
+    ],
+)

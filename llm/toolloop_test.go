@@ -1,4 +1,4 @@
-package orchestrator
+package llm
 
 import (
 	"context"
@@ -7,11 +7,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/baalamai/orchestrator"
 )
 
 // ── Test doubles ──────────────────────────────────────────────────────
 
-// fakeLLM is a scripted LLMClient: returns responses from a pre-built list in order.
+// fakeLLM is a scripted Client: returns responses from a pre-built list in order.
 type fakeLLM struct {
 	responses []CompletionResponse
 	calls     []CompletionRequest
@@ -46,7 +48,7 @@ func (t *fakeTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *fakeTool) Invoke(_ context.Context, call ToolCall, _ StateView, _ *Turn) (ToolResult, error) {
+func (t *fakeTool) Invoke(_ context.Context, call ToolCall, _ orchestrator.StateView, _ *orchestrator.Turn) (ToolResult, error) {
 	t.calls = append(t.calls, call)
 	return t.result, t.err
 }
@@ -56,18 +58,18 @@ func (t *fakeTool) Invoke(_ context.Context, call ToolCall, _ StateView, _ *Turn
 // TestToolLoop_DirectAnswer: LLM returns end_turn on first call, no tools.
 func TestToolLoop_DirectAnswer(t *testing.T) {
 	llm := &fakeLLM{responses: []CompletionResponse{
-		{Content: "hola", StopReason: StopReasonEndTurn, Usage: &Usage{TotalTokens: 42}},
+		{Content: "hola", StopReason: StopReasonEndTurn, Usage: &orchestrator.Usage{TotalTokens: 42}},
 	}}
 
 	node := NewToolLoopNode(llm, ToolLoopOptions{Model: "test"})
-	res, err := node(context.Background(), noopView{}, NewTurn("c1", "hi"), &NodeInput{})
+	res, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", "hi"), &orchestrator.NodeInput{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Answer != "hola" {
 		t.Errorf("expected 'hola', got %q", res.Answer)
 	}
-	if res.Event != EventWaitUser {
+	if res.Event != orchestrator.EventWaitUser {
 		t.Errorf("expected EventWaitUser, got %q", res.Event)
 	}
 	if res.Usage == nil || res.Usage.TotalTokens != 42 {
@@ -88,13 +90,13 @@ func TestToolLoop_SingleToolCall(t *testing.T) {
 		{
 			StopReason: StopReasonToolUse,
 			ToolCalls:  []ToolCall{{ID: "call_1", Name: "search", Input: json.RawMessage(`{"q":"x"}`)}},
-			Usage:      &Usage{TotalTokens: 10},
+			Usage:      &orchestrator.Usage{TotalTokens: 10},
 		},
-		{Content: "aquí hay 3", StopReason: StopReasonEndTurn, Usage: &Usage{TotalTokens: 5}},
+		{Content: "aquí hay 3", StopReason: StopReasonEndTurn, Usage: &orchestrator.Usage{TotalTokens: 5}},
 	}}
 
 	node := NewToolLoopNode(llm, ToolLoopOptions{Model: "test", Tools: []Tool{search}})
-	res, err := node(context.Background(), noopView{}, NewTurn("c1", "buscar"), &NodeInput{})
+	res, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", "buscar"), &orchestrator.NodeInput{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -135,7 +137,7 @@ func TestToolLoop_MultiRound(t *testing.T) {
 	}}
 
 	node := NewToolLoopNode(llm, ToolLoopOptions{Model: "t", Tools: []Tool{search, lookup}})
-	res, err := node(context.Background(), noopView{}, NewTurn("c1", ""), &NodeInput{})
+	res, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", ""), &orchestrator.NodeInput{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,9 +160,9 @@ func TestToolLoop_ToolError_ReportToLLM(t *testing.T) {
 	node := NewToolLoopNode(llm, ToolLoopOptions{
 		Model:       "t",
 		Tools:       []Tool{failing},
-		OnToolError: ToolErrorReportToLLM,
+		OnToolError: ToolErrorReport,
 	})
-	res, err := node(context.Background(), noopView{}, NewTurn("c1", ""), &NodeInput{})
+	res, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", ""), &orchestrator.NodeInput{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,7 +196,7 @@ func TestToolLoop_ToolError_Propagate(t *testing.T) {
 		Tools:       []Tool{failing},
 		OnToolError: ToolErrorPropagate,
 	})
-	_, err := node(context.Background(), noopView{}, NewTurn("c1", ""), &NodeInput{})
+	_, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", ""), &orchestrator.NodeInput{})
 	if err == nil {
 		t.Fatal("expected error to propagate")
 	}
@@ -220,7 +222,7 @@ func TestToolLoop_MaxIterations(t *testing.T) {
 		Tools:         []Tool{loopTool},
 		MaxIterations: 3,
 	})
-	_, err := node(context.Background(), noopView{}, NewTurn("c1", ""), &NodeInput{})
+	_, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", ""), &orchestrator.NodeInput{})
 	if !errors.Is(err, ErrToolLoopMaxIterations) {
 		t.Fatalf("expected ErrToolLoopMaxIterations, got %v", err)
 	}
@@ -237,7 +239,7 @@ func TestToolLoop_UnknownTool(t *testing.T) {
 	}}
 	node := NewToolLoopNode(llm, ToolLoopOptions{Model: "t"})
 
-	res, err := node(context.Background(), noopView{}, NewTurn("c1", ""), &NodeInput{})
+	res, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", ""), &orchestrator.NodeInput{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -262,7 +264,7 @@ func TestToolLoop_DeltaMerged(t *testing.T) {
 		name: "t1",
 		result: ToolResult{
 			Content: "done",
-			Delta:   &StateDelta{Updates: map[string]any{"k": "v"}},
+			Delta:   &orchestrator.StateDelta{Updates: map[string]any{"k": "v"}},
 		},
 	}
 	llm := &fakeLLM{responses: []CompletionResponse{
@@ -271,7 +273,7 @@ func TestToolLoop_DeltaMerged(t *testing.T) {
 	}}
 	node := NewToolLoopNode(llm, ToolLoopOptions{Model: "t", Tools: []Tool{tool}})
 
-	res, err := node(context.Background(), noopView{}, NewTurn("c1", ""), &NodeInput{})
+	res, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", ""), &orchestrator.NodeInput{})
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -299,7 +301,7 @@ func TestToolLoop_Hooks(t *testing.T) {
 		},
 	})
 
-	_, err := node(context.Background(), noopView{}, NewTurn("c1", ""), &NodeInput{})
+	_, err := node(context.Background(), noopView{}, orchestrator.NewTurn("c1", ""), &orchestrator.NodeInput{})
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -313,13 +315,13 @@ func TestToolLoop_Hooks(t *testing.T) {
 
 // ── Test helpers ──────────────────────────────────────────────────────
 
-// noopView is a zero-value StateView for isolated tool-loop tests.
+// noopView is a zero-value orchestrator.StateView for isolated tool-loop tests.
 type noopView struct{}
 
-func (noopView) Get(string) (any, bool)     { return nil, false }
-func (noopView) GetString(string) string    { return "" }
-func (noopView) GetBool(string) bool        { return false }
-func (noopView) HasFlag(string) bool        { return false }
-func (noopView) State() map[string]any      { return map[string]any{} }
-func (noopView) Messages() []Message        { return nil }
-func (noopView) Memory() map[string]any     { return nil }
+func (noopView) Get(string) (any, bool)           { return nil, false }
+func (noopView) GetString(string) string          { return "" }
+func (noopView) GetBool(string) bool              { return false }
+func (noopView) HasFlag(string) bool              { return false }
+func (noopView) State() map[string]any            { return map[string]any{} }
+func (noopView) Messages() []orchestrator.Message { return nil }
+func (noopView) Memory() map[string]any           { return nil }

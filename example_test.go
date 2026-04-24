@@ -5,11 +5,13 @@ import (
 	"fmt"
 
 	orch "github.com/baalamai/orchestrator"
+	st "github.com/baalamai/orchestrator/store"
+	sup "github.com/baalamai/orchestrator/supervisor"
 )
 
 func ExampleEngine_Run() {
 	engine := orch.NewPipelineBuilder().
-		WithSupervisor(orch.NewLinearSupervisor("greet", "farewell")).
+		WithSupervisor(sup.NewLinear("greet", "farewell")).
 		RegisterNode("greet", func(_ context.Context, _ orch.StateView, turn *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 			return &orch.NodeResult{Event: orch.EventPhaseComplete, Answer: "Hola " + turn.Text + "!"}, nil
 		}).
@@ -18,7 +20,7 @@ func ExampleEngine_Run() {
 		}).
 		MustBuild()
 
-	store := orch.NewMemoryStore()
+	store := st.NewMemory()
 	result, err := engine.Run(context.Background(), store, orch.NewTurn("conv-1", "mundo"))
 	if err != nil {
 		panic(err)
@@ -27,11 +29,11 @@ func ExampleEngine_Run() {
 	// Output: En que mas te puedo ayudar?
 }
 
-func ExampleNewLinearSupervisor() {
+func Example_linearSupervisor() {
 	// LinearSupervisor executes phases in order: intake → process → respond.
 	// Each phase must emit EventPhaseComplete to advance to the next one.
 	engine := orch.NewPipelineBuilder().
-		WithSupervisor(orch.NewLinearSupervisor("intake", "process", "respond")).
+		WithSupervisor(sup.NewLinear("intake", "process", "respond")).
 		RegisterNode("intake", func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 			return &orch.NodeResult{Event: orch.EventPhaseComplete}, nil
 		}).
@@ -43,28 +45,28 @@ func ExampleNewLinearSupervisor() {
 		}).
 		MustBuild()
 
-	result, _ := engine.Run(context.Background(), orch.NewMemoryStore(), orch.NewTurn("c1", "test"))
+	result, _ := engine.Run(context.Background(), st.NewMemory(), orch.NewTurn("c1", "test"))
 	fmt.Println(result.Answer)
 	// Output: Procesado: test
 }
 
-func ExampleStateMachineSupervisor() {
-	// StateMachineSupervisor uses rules to decide the next phase:
+func Example_stateMachineSupervisor() {
+	// StateMachine supervisor uses rules to decide the next phase:
 	// 1. Transitions on EventPhaseComplete (diagnostic → payment)
 	// 2. State flags (chosen_payment=true → register)
 	// 3. DefaultPhase as fallback
-	sup := &orch.StateMachineSupervisor{
+	supv := &sup.StateMachine{
 		DefaultPhase: "diagnostic",
-		Transitions: []orch.TransitionRule{
+		Transitions: []sup.TransitionRule{
 			{From: "diagnostic", To: "payment"},
 		},
-		FlagRules: []orch.FlagRule{
+		FlagRules: []sup.FlagRule{
 			{Flag: "chosen_payment", Phase: "register"},
 		},
 	}
 
 	engine := orch.NewPipelineBuilder().
-		WithSupervisor(sup).
+		WithSupervisor(supv).
 		RegisterNode("diagnostic", func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 			return &orch.NodeResult{
 				Event:  orch.EventPhaseComplete,
@@ -81,7 +83,7 @@ func ExampleStateMachineSupervisor() {
 		MustBuild()
 
 	// First turn: starts at diagnostic (default) → cascades to payment
-	result, _ := engine.Run(context.Background(), orch.NewMemoryStore(), orch.NewTurn("c1", "hola"))
+	result, _ := engine.Run(context.Background(), st.NewMemory(), orch.NewTurn("c1", "hola"))
 	fmt.Println(result.Answer)
 	// Output: Selecciona tu metodo de pago
 }

@@ -1,25 +1,29 @@
-package orchestrator
+package orchestrator_test
 
 import (
 	"context"
 	"errors"
 	"testing"
+
+	orch "github.com/baalamai/orchestrator"
+	"github.com/baalamai/orchestrator/store"
+	"github.com/baalamai/orchestrator/supervisor"
 )
 
 // TestMemoryCheckpointStore_SaveLoadClear covers the basic port contract.
 func TestMemoryCheckpointStore_SaveLoadClear(t *testing.T) {
 	ctx := context.Background()
-	store := NewMemoryCheckpointStore()
+	store := store.NewMemoryCheckpoint()
 
 	if got, err := store.Load(ctx, "missing"); err != nil || got != nil {
 		t.Fatalf("expected nil,nil for missing; got %v,%v", got, err)
 	}
 
-	ckpt := &Checkpoint{
+	ckpt := &orch.Checkpoint{
 		TurnID:    "t1",
 		Step:      2,
 		Phase:     "diagnostic",
-		LastEvent: EventPhaseComplete,
+		LastEvent: orch.EventPhaseComplete,
 		State:     map[string]any{"foo": "bar"},
 	}
 	if err := store.Save(ctx, ckpt); err != nil {
@@ -51,11 +55,11 @@ func TestMemoryCheckpointStore_SaveLoadClear(t *testing.T) {
 // TestEngine_NoCheckpoint_NoRegression verifies that with no CheckpointStore
 // configured, Engine.Run behaves exactly as before.
 func TestEngine_NoCheckpoint_NoRegression(t *testing.T) {
-	engine := buildSimpleNodeEngine("p", dummyNode("ok", EventWaitUser))
+	engine := buildSimpleNodeEngine("p", dummyNode("ok", orch.EventWaitUser))
 
-	turn := NewTurn("c1", "hi")
+	turn := orch.NewTurn("c1", "hi")
 	turn.TurnID = "t1" // even with TurnID, no store means no checkpointing
-	result, err := engine.Run(context.Background(), NewMemoryStore(), turn)
+	result, err := engine.Run(context.Background(), store.NewMemory(), turn)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -67,18 +71,18 @@ func TestEngine_NoCheckpoint_NoRegression(t *testing.T) {
 // TestEngine_CheckpointSavedOnSuccess verifies a checkpoint is written per step
 // and cleared on normal completion.
 func TestEngine_CheckpointSavedOnSuccess(t *testing.T) {
-	ckStore := NewMemoryCheckpointStore()
+	ckStore := store.NewMemoryCheckpoint()
 
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{DefaultPhase: "p"}).
-		RegisterNode("p", dummyNode("done", EventWaitUser)).
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{DefaultPhase: "p"}).
+		RegisterNode("p", dummyNode("done", orch.EventWaitUser)).
 		WithCheckpoints(ckStore).
 		MustBuild()
 
-	turn := NewTurn("c1", "hi")
+	turn := orch.NewTurn("c1", "hi")
 	turn.TurnID = "t-success"
 
-	_, err := engine.Run(context.Background(), NewMemoryStore(), turn)
+	_, err := engine.Run(context.Background(), store.NewMemory(), turn)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -93,23 +97,23 @@ func TestEngine_CheckpointSavedOnSuccess(t *testing.T) {
 // TestEngine_CheckpointSurvivesLoopError verifies checkpoint is NOT cleared
 // when the loop returns an error — the next retry can resume.
 func TestEngine_CheckpointSurvivesLoopError(t *testing.T) {
-	ckStore := NewMemoryCheckpointStore()
+	ckStore := store.NewMemoryCheckpoint()
 	callCount := 0
-	failingNode := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
+	failingNode := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 		callCount++
 		return nil, errors.New("downstream boom")
 	}
 
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{DefaultPhase: "p"}).
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{DefaultPhase: "p"}).
 		RegisterNode("p", failingNode).
 		WithCheckpoints(ckStore).
 		MustBuild()
 
-	turn := NewTurn("c1", "hi")
+	turn := orch.NewTurn("c1", "hi")
 	turn.TurnID = "t-fail"
 
-	_, err := engine.Run(context.Background(), NewMemoryStore(), turn)
+	_, err := engine.Run(context.Background(), store.NewMemory(), turn)
 	if err == nil {
 		t.Fatal("expected error from failing node")
 	}
@@ -126,14 +130,14 @@ func TestEngine_CheckpointSurvivesLoopError(t *testing.T) {
 // first phase completes and is checkpointed, a simulated crash + retry resumes
 // at the next phase, without re-running the first phase.
 func TestEngine_ResumeFromCheckpoint(t *testing.T) {
-	ckStore := NewMemoryCheckpointStore()
+	ckStore := store.NewMemoryCheckpoint()
 
 	// Pre-populate the checkpoint as if phase "a" already completed pre-crash.
-	preCrash := &Checkpoint{
+	preCrash := &orch.Checkpoint{
 		TurnID:        "t-resume",
 		Step:          1,
 		Phase:         "a",
-		LastEvent:     EventPhaseComplete,
+		LastEvent:     orch.EventPhaseComplete,
 		SharedContext: map[string]any{"from_a": "v"},
 	}
 	if err := ckStore.Save(context.Background(), preCrash); err != nil {
@@ -142,23 +146,23 @@ func TestEngine_ResumeFromCheckpoint(t *testing.T) {
 
 	aCalls := 0
 	bCalls := 0
-	a := func(_ context.Context, _ StateView, _ *Turn, _ *NodeInput) (*NodeResult, error) {
+	a := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
 		aCalls++
-		return &NodeResult{Event: EventPhaseComplete, Answer: "from a"}, nil
+		return &orch.NodeResult{Event: orch.EventPhaseComplete, Answer: "from a"}, nil
 	}
-	b := func(_ context.Context, _ StateView, _ *Turn, input *NodeInput) (*NodeResult, error) {
+	b := func(_ context.Context, _ orch.StateView, _ *orch.Turn, input *orch.NodeInput) (*orch.NodeResult, error) {
 		bCalls++
 		// Assert SharedContext was restored from checkpoint.
 		if v, _ := input.SharedContext["from_a"].(string); v != "v" {
 			t.Errorf("expected shared context restored, got %v", input.SharedContext)
 		}
-		return &NodeResult{Event: EventWaitUser, Answer: "from b"}, nil
+		return &orch.NodeResult{Event: orch.EventWaitUser, Answer: "from b"}, nil
 	}
 
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{
 			DefaultPhase: "a",
-			Transitions:  []TransitionRule{{From: "a", To: "b"}},
+			Transitions:  []supervisor.TransitionRule{{From: "a", To: "b"}},
 		}).
 		RegisterNode("a", a).
 		RegisterNode("b", b).
@@ -166,10 +170,10 @@ func TestEngine_ResumeFromCheckpoint(t *testing.T) {
 		WithCheckpoints(ckStore).
 		MustBuild()
 
-	turn := NewTurn("c1", "hi")
+	turn := orch.NewTurn("c1", "hi")
 	turn.TurnID = "t-resume"
 
-	store := NewMemoryStore()
+	store := store.NewMemory()
 	// Simulate that pre-crash already added the user message.
 	_ = store.AddMessage("user", "hi")
 
@@ -209,16 +213,16 @@ func TestEngine_ResumeFromCheckpoint(t *testing.T) {
 // preprocess hooks DO re-run on resume (they must be idempotent), but AddMessage
 // does NOT. This protects against duplicate user messages in the store.
 func TestEngine_ResumeDoesNotReAddUserMessage(t *testing.T) {
-	ckStore := NewMemoryCheckpointStore()
-	_ = ckStore.Save(context.Background(), &Checkpoint{
-		TurnID: "t", Step: 1, Phase: "p", LastEvent: EventWaitUser,
+	ckStore := store.NewMemoryCheckpoint()
+	_ = ckStore.Save(context.Background(), &orch.Checkpoint{
+		TurnID: "t", Step: 1, Phase: "p", LastEvent: orch.EventWaitUser,
 	})
 
 	preprocessCalls := 0
-	engine := NewPipelineBuilder().
-		WithSupervisor(&StateMachineSupervisor{DefaultPhase: "p"}).
-		RegisterNode("p", dummyNode("", EventWaitUser)).
-		OnPreprocess(func(_ context.Context, _ StateStore, _ *Turn) error {
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&supervisor.StateMachine{DefaultPhase: "p"}).
+		RegisterNode("p", dummyNode("", orch.EventWaitUser)).
+		OnPreprocess(func(_ context.Context, _ orch.StateStore, _ *orch.Turn) error {
 			preprocessCalls++
 			return nil
 		}).
@@ -226,10 +230,10 @@ func TestEngine_ResumeDoesNotReAddUserMessage(t *testing.T) {
 		MaxSteps(5).
 		MustBuild()
 
-	turn := NewTurn("c1", "original user message")
+	turn := orch.NewTurn("c1", "original user message")
 	turn.TurnID = "t"
 
-	store := NewMemoryStore()
+	store := store.NewMemory()
 	// Simulate the pre-crash AddMessage already happened.
 	_ = store.AddMessage("user", "original user message")
 
