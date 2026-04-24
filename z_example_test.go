@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	orch "chatservices/lib/orchestrator"
+	orch "github.com/baalamai/orchestrator"
 )
 
 func ExampleEngine_Run() {

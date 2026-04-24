@@ -1,5 +1,10 @@
 package orchestrator
 
+import (
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+)
+
 // NodeConfig declares a single phase node and its middleware.
 type NodeConfig struct {
 	// Phase is the name that identifies this node (e.g. "diagnostic", "payment").
@@ -57,6 +62,21 @@ type PipelineConfig struct {
 	// Cost computes USD cost from usage for MaxCostUSD budget enforcement.
 	// Optional; defaults to noopCostCalculator (always 0).
 	Cost CostCalculator
+	// Tracer emits OpenTelemetry spans for turn, supervisor, node, and attempt.
+	// Optional; defaults to a noop tracer (zero overhead).
+	Tracer trace.Tracer
+	// Meter emits counters and histograms for tokens, cost, phase duration, retries.
+	// Optional; defaults to a noop meter (zero overhead).
+	Meter metric.Meter
+	// Checkpoints enables mid-turn durability: the engine saves after each phase
+	// and resumes from the last saved point on Run() if a checkpoint exists for
+	// the Turn.TurnID. Optional; nil disables checkpointing.
+	//
+	// Idempotency contract: phases replayed after resume must be idempotent.
+	// Tools with visible side-effects (send message, create payment link) must
+	// deduplicate internally by natural key — the engine does NOT track which
+	// tools already ran pre-crash. See lib/orchestrator/checkpoint.go docs.
+	Checkpoints CheckpointStore
 	// Nodes is the ordered list of phase nodes registered in the pipeline.
 	// Each node maps a phase name to a pure-function agent with optional middleware.
 	Nodes []NodeConfig
@@ -82,6 +102,15 @@ func BuildFromConfig(cfg PipelineConfig) (*Engine, error) {
 	}
 	if cfg.Cost != nil {
 		b.WithCostCalculator(cfg.Cost)
+	}
+	if cfg.Tracer != nil {
+		b.WithTracer(cfg.Tracer)
+	}
+	if cfg.Meter != nil {
+		b.WithMeter(cfg.Meter)
+	}
+	if cfg.Checkpoints != nil {
+		b.WithCheckpoints(cfg.Checkpoints)
 	}
 
 	var repeatables []string

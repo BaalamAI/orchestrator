@@ -4,12 +4,12 @@ Framework genérico para pipelines de agentes con supervisor loop. Desacopla el 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        shared/orchestrator                          │
+│                github.com/baalamai/orchestrator                     │
 │                                                                     │
 │   ROUTING            EJECUCIÓN              PERSISTENCIA           │
 │   ────────           ──────────             ─────────────          │
 │   Supervisor  ──▶   AgentHandler   ──▶     StateStore             │
-│   (decide fase)     NodeFunc + MW           (Redis / Memory)       │
+│   (decide fase)     NodeFunc + MW           (impl. del consumidor) │
 │                         │                                           │
 │                     PipelineResult                                  │
 │                     {Answer, Usage, Metadata}                       │
@@ -27,9 +27,10 @@ Framework genérico para pipelines de agentes con supervisor loop. Desacopla el 
 5. [Middleware (NodeFunc)](#middleware-nodefunc)
 6. [State Persistence](#state-persistence)
 7. [Usage Tracking](#usage-tracking)
-8. [Quick Start](#quick-start)
-9. [Estructura de archivos](#estructura-de-archivos)
-10. [API de referencia](#api-de-referencia)
+8. [Observabilidad (OpenTelemetry)](#observabilidad-opentelemetry)
+9. [Quick Start](#quick-start)
+10. [Estructura de archivos](#estructura-de-archivos)
+11. [API de referencia](#api-de-referencia)
 
 ---
 
@@ -317,25 +318,6 @@ engine := orch.NewPipelineBuilder().
     MustBuild()
 ```
 
-### Hooks built-in (`adapters/`)
-
-| Hook | Tipo | Qué hace |
-|------|------|----------|
-| `FallbackHook` | Postprocess | Respuesta por defecto si `result.Answer == ""` |
-| `WhatsAppFormatHook` | Postprocess | Convierte `**bold**` → `*bold*` |
-| `SaveResponseHook` | Postprocess | Persiste la respuesta en `store.AddMessage("model", ...)` |
-
-`PipelineDefaults()` registra los tres automáticamente:
-
-```go
-import "chatservices/shared/orchestrator/adapters"
-
-engine := adapters.PipelineDefaults().   // maxSteps=3 + FallbackHook + WhatsAppFormat + SaveResponse
-    WithSupervisor(mySupervisor).
-    RegisterAgent("diagnostic", diagHandler).
-    MustBuild()
-```
-
 ---
 
 ## Middleware (NodeFunc)
@@ -445,7 +427,8 @@ type StateStore interface {
 | Implementación | Cuándo usarla |
 |----------------|---------------|
 | `MemoryStore` (`teststore.go`) | Tests, ejemplos |
-| `RedisStateAdapter` (`adapters/`) | Producción, wrappea `*state.State` |
+
+> Para producción basta con que tu código implemente `StateStore` sobre el backend que uses (Redis, Postgres, etc.). El módulo no incluye adapters concretos — queda a cargo del consumidor.
 
 ---
 
@@ -478,12 +461,109 @@ type ModelUsage struct {
 }
 ```
 
-**Conversión entre capas** (`adapters/usage.go`):
+---
+
+## Observabilidad (OpenTelemetry)
+
+El engine emite **spans** y **métricas** OpenTelemetry cuando se configura `Tracer` y `Meter` en `PipelineConfig`. Sin configuración explícita, usa proveedores noop — cero overhead.
 
 ```go
-orchUsage := adapters.ConvertUsageToOrchestrator(agentsUsage)  // agents.Usage → orchestrator.Usage
-modelsUsage := adapters.ConvertUsageToModels(orchUsage)         // orchestrator.Usage → agents.Usage
+cfg := orchestrator.PipelineConfig{
+    // ... otros campos
+    Tracer: otel.Tracer("orchestrator"),
+    Meter:  otel.Meter("orchestrator"),
+}
 ```
+
+### Jerarquía de spans
+
+```
+orchestrator.turn                [conversation.id, org.id, channel, final.phase, usage.*]
+├── orchestrator.supervisor      [step, current.phase, decided.phases, reason, usage.total_tokens]
+├── orchestrator.node            [phase, parallel, event, usage.total_tokens]
+│   ├── orchestrator.node.attempt         [phase, attempt, max_attempts, error.category]
+│   └── orchestrator.node.concurrent      [phase]  ← solo cuando hay ParallelSupervisor
+```
+
+### Métricas
+
+| Nombre | Tipo | Labels |
+|--------|------|--------|
+| `orchestrator.tokens` | Int64Counter | `phase`, `model`, `provider`, `kind=prompt\|completion` |
+| `orchestrator.cost_usd` | Float64Counter | `phase`, `model` |
+| `orchestrator.phase.duration_ms` | Float64Histogram | `phase`, `outcome=ok\|error\|budget\|error_threshold` |
+| `orchestrator.llm.duration_ms` | Float64Histogram | `model`, `provider` (emitida por ToolLoopNode) |
+| `orchestrator.tool.duration_ms` | Float64Histogram | `tool` (emitida por ToolLoopNode) |
+| `orchestrator.tool.calls` | Int64Counter | `tool`, `outcome=ok\|error\|unknown` |
+| `orchestrator.retries` | Int64Counter | `phase`, `category=permanent\|transient\|rate_limit` |
+| `orchestrator.checkpoint` | Int64Counter | `event=save\|load\|resume\|clear\|miss\|error` |
+
+### Wiring en el service main
+
+El SDK de OTel vive en el consumidor del framework, no en `lib/orchestrator/`:
+
+```go
+import (
+    sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+    sdktrace "go.opentelemetry.io/otel/sdk/trace"
+)
+
+tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter))
+mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+cfg.Tracer = tp.Tracer("orchestrator")
+cfg.Meter  = mp.Meter("orchestrator")
+```
+
+### Complementariedad con AgentTree
+
+AgentTree (en `services/knowledge/`) captura **eventos de producto** (qué pasó en la conversación, consumidos por la UI). OTel captura **performance** (cuánto tardó cada fase, latencias cross-servicio). Usarlos juntos:
+
+- AgentTree → SSE para UI, Mongo para análisis histórico
+- OTel → Jaeger/Tempo para tracing, Prometheus para alerting
+
+---
+
+## Durabilidad (Checkpoint / Resume)
+
+El engine soporta **checkpoint mid-turn**: después de cada fase exitosa guarda el estado del loop, y en la siguiente llamada con el mismo `Turn.TurnID` reanuda desde ese punto en vez de reiniciar. Útil para sobrevivir crashes, deploys mid-turn, o retries idempotentes sin perder el progreso (ni la factura del LLM).
+
+```go
+cfg := orchestrator.PipelineConfig{
+    // ... otros campos
+    Checkpoints: myCheckpointStore, // implementa CheckpointStore
+}
+
+turn := orchestrator.NewTurn(convID, text)
+turn.TurnID = interactionID // ID estable por turno (ej: InteractionID)
+```
+
+### Semántica
+
+- **Save**: al final de cada step exitoso (tras `propagateNodeOutput`), fire-and-forget con log warn en error.
+- **Resume**: en `Run()`, si `TurnID` + `Checkpoints` están configurados y hay checkpoint, el engine:
+  - Restaura `phase`, `lastEvent`, `steps`, `sharedContext`, `errorLedger`, `Usage`.
+  - **Salta** `store.AddMessage("user", ...)` para no duplicar el mensaje (ya en store pre-crash).
+  - **Re-ejecuta** hooks preprocess (deben ser idempotentes — típicamente hidratan `turn.Metadata`).
+- **Clear**: en completion normal (sin error en el loop). En `ctx.Cancel` o error fatal, el checkpoint queda disponible para el siguiente reintento.
+
+### Contrato de idempotencia
+
+⚠️ **Crítico**: tools con side-effects visibles al usuario (enviar mensaje WhatsApp, crear link de pago, cobrar tarjeta) **deben** deduplicar por natural key. El engine garantiza *at-least-once* para la fase que estaba corriendo al momento del crash — no rastrea qué tools individuales ya se ejecutaron.
+
+`ToolDefinition.Idempotent = true` es una aserción del autor del tool, no un mecanismo del engine. Sirve como documentación y como atributo en spans OTel para auditar.
+
+### Port
+
+```go
+type CheckpointStore interface {
+    Save(ctx context.Context, ckpt *Checkpoint) error
+    Load(ctx context.Context, turnID string) (*Checkpoint, error) // (nil, nil) si no existe
+    Clear(ctx context.Context, turnID string) error
+}
+```
+
+`MemoryCheckpointStore` viene incluido para tests. Adapter Redis vive en el consumidor.
 
 ---
 
@@ -494,7 +574,7 @@ modelsUsage := adapters.ConvertUsageToModels(orchUsage)         // orchestrator.
 ```go
 import (
     "context"
-    orch "chatservices/shared/orchestrator"
+    orch "github.com/baalamai/orchestrator"
 )
 
 engine := orch.NewPipelineBuilder().
@@ -547,33 +627,35 @@ engine := orch.NewPipelineBuilder().
 ```
 orchestrator/
 ├── doc.go               ← Documentación del paquete (go doc)
-├── domain.go            ← Tipos e interfaces: Turn, AgentResult, NodeResult,
-│                           StateStore, StateView, StateDelta, NodeInput,
-│                           Supervisor, EventType, Usage, Message
-├── orchestrator.go      ← Engine.Run() y el execution loop
+├── domain.go            ← Tipos centrales: Turn, Message, Usage, StateStore,
+│                           Supervisor, ParallelSupervisor, IntentRouter, EventType, Phase
+├── ports.go             ← Interfaces para consumidores: LLMClient, Tool,
+│                           ErrorClassifier, CostCalculator
+├── engine.go            ← Engine struct, hooks, RetryPolicy, BudgetConfig, Engine.Run()
+├── loop.go              ← Execution loop: decidePhases, runPhases, stopEvent
+├── parallel.go          ← Soporte de ParallelSupervisor (fases concurrentes)
+├── retry.go             ← retryLoop + commitDelta (ejecución con retries)
 ├── supervisor.go        ← StateMachineSupervisor, LinearSupervisor
 ├── builder.go           ← PipelineBuilder (API fluent)
+├── config.go            ← PipelineConfig + BuildFromConfig (alternativa declarativa)
+├── hooks.go             ← Helpers de composición: ConditionalPreprocess,
+│                           WithTimeout, WhenChannel, …
+├── middleware.go        ← ComposeParallel (agregar NodeProviders en paralelo)
 ├── snapshot.go          ← NewSnapshot(): crea StateView desde StateStore
-├── teststore.go         ← MemoryStore (StateStore in-memory para tests)
-└── adapters/
-    ├── pipeline.go      ← PipelineDefaults() factory
-    ├── hooks.go         ← FallbackHook, WhatsAppFormatHook, SaveResponseHook
-    ├── redis_state.go   ← RedisStateAdapter (wrappea *state.State)
-    ├── webhook.go       ← TurnFromWebHook(), WebHookFromTurn()
-    ├── usage.go         ← ConvertUsageToOrchestrator(), ConvertUsageToModels()
-    └── errors.go        ← Errores del adapter
+└── teststore.go         ← MemoryStore (StateStore in-memory para tests)
 ```
 
 ### Orden de lectura (primera vez en el módulo)
 
 | # | Archivo | Qué encontrarás |
 |---|---------|-----------------|
-| 1 | `domain.go` | **Empieza aquí.** Todos los tipos e interfaces |
-| 2 | `orchestrator.go` | El execution loop completo |
+| 1 | `domain.go` | **Empieza aquí.** Tipos e interfaces centrales |
+| 2 | `engine.go` + `loop.go` | `Engine.Run()` y el execution loop |
 | 3 | `supervisor.go` | `StateMachineSupervisor` y `LinearSupervisor` |
 | 4 | `builder.go` | API fluent del builder |
-| 5 | `teststore.go` | Solo si escribes tests: `MemoryStore` |
-| 6 | `adapters/` | Solo si integras con Redis, webhooks o hooks built-in |
+| 5 | `config.go` | Alternativa declarativa al builder (`BuildFromConfig`) |
+| 6 | `retry.go` + `parallel.go` | Solo si te interesa el camino de retries y fases paralelas |
+| 7 | `teststore.go` | Solo si escribes tests: `MemoryStore` |
 
 ---
 
@@ -641,13 +723,3 @@ type IntentRouter interface {
 | `EventStepSuccess` | Continúa (siguiente iteración) | `StepSuccess(answer)` |
 | `EventPhaseComplete` | Marca fase completa, cascadea a siguiente | `PhaseComplete(answer)` |
 
-### Adapters
-
-| Componente | Descripción |
-|------------|-------------|
-| `adapters.PipelineDefaults()` | Builder pre-configurado con `maxSteps=3` + 3 hooks built-in |
-| `adapters.NewRedisStateAdapter(st)` | `StateStore` sobre `*state.State` (producción) |
-| `adapters.TurnFromWebHook(w)` | Convierte `*webhook.WebHook` → `*Turn` |
-| `adapters.WebHookFromTurn(turn)` | Extrae el webhook original del `turn.Metadata` |
-| `adapters.ConvertUsageToOrchestrator(u)` | `agents.Usage` → `orchestrator.Usage` |
-| `adapters.ConvertUsageToModels(u)` | `orchestrator.Usage` → `agents.Usage` |

@@ -1,9 +1,12 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# gazelle:prefix github.com/baalamai/orchestrator
+
 go_library(
     name = "orchestrator",
     srcs = [
         "builder.go",
+        "checkpoint.go",
         "config.go",
         "doc.go",
         "domain.go",
@@ -11,6 +14,7 @@ go_library(
         "errors.go",
         "hooks.go",
         "loop.go",
+        "metrics.go",
         "middleware.go",
         "parallel.go",
         "ports.go",
@@ -18,23 +22,39 @@ go_library(
         "snapshot.go",
         "supervisor.go",
         "teststore.go",
+        "toolloop.go",
     ],
-    importpath = "chatservices/lib/orchestrator",
+    importpath = "github.com/baalamai/orchestrator",
     visibility = ["//visibility:public"],
-    deps = ["@org_golang_x_sync//errgroup"],
+    deps = [
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel//codes",
+        "@io_opentelemetry_go_otel_metric//:metric",
+        "@io_opentelemetry_go_otel_metric//noop",
+        "@io_opentelemetry_go_otel_trace//:trace",
+        "@io_opentelemetry_go_otel_trace//noop",
+        "@org_golang_x_sync//errgroup",
+    ],
 )
 
 go_test(
     name = "orchestrator_test",
     srcs = [
         "z_builder_test.go",
+        "z_checkpoint_test.go",
         "z_domain_test.go",
         "z_engine_test.go",
         "z_example_test.go",
         "z_loop_test.go",
+        "z_otel_test.go",
         "z_retry_test.go",
         "z_supervisor_test.go",
         "z_teststore_test.go",
+        "z_toolloop_test.go",
     ],
     embed = [":orchestrator"],
+    deps = [
+        "@io_opentelemetry_go_otel_metric//noop",
+        "@io_opentelemetry_go_otel_trace//noop",
+    ],
 )

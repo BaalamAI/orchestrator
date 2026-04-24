@@ -85,6 +85,10 @@ type Phase = string
 
 // Turn is a channel-agnostic representation of a user message entering the pipeline.
 type Turn struct {
+	// TurnID uniquely identifies this turn for idempotent retries and checkpoint resume.
+	// Callers should set a stable ID (e.g. an InteractionID or UUID) before calling Run.
+	// When empty, checkpointing is disabled for this turn even if a CheckpointStore is configured.
+	TurnID string
 	// ConversationID uniquely identifies the conversation this message belongs to.
 	ConversationID string
 	// UserID identifies the end-user who sent the message.

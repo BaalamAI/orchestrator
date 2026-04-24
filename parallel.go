@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -65,8 +68,15 @@ func (e *Engine) runConcurrentPhases(ctx context.Context, store StateStore, turn
 	eg, gCtx := errgroup.WithContext(ctx)
 	for _, phase := range phases {
 		eg.Go(func() error {
-			nr, err := e.retryDeferred(gCtx, store, turn, phase, policy, ledger, sharedCtx)
+			phaseCtx, span := e.tracer.Start(gCtx, "orchestrator.node.concurrent",
+				trace.WithAttributes(attribute.String("phase", phase)),
+			)
+			defer span.End()
+
+			nr, err := e.retryDeferred(phaseCtx, store, turn, phase, policy, ledger, sharedCtx)
 			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				return fmt.Errorf("error in %s agent: %w", phase, err)
 			}
 			mergeInto(merged, mu, nr)

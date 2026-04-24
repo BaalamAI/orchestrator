@@ -1,6 +1,13 @@
 package orchestrator
 
-import "fmt"
+import (
+	"fmt"
+
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
+)
 
 // PipelineBuilder provides a fluent API for constructing a pipeline engine.
 type PipelineBuilder struct {
@@ -19,6 +26,9 @@ type PipelineBuilder struct {
 	logger               Logger
 	classifier           ErrorClassifier
 	cost                 CostCalculator
+	tracer               trace.Tracer
+	meter                metric.Meter
+	checkpoints          CheckpointStore
 }
 
 // NewPipelineBuilder creates a new PipelineBuilder with sensible defaults (maxSteps=3).
@@ -60,6 +70,27 @@ func (b *PipelineBuilder) WithClassifier(c ErrorClassifier) *PipelineBuilder {
 // always returns 0 — MaxCostUSD limits never trip.
 func (b *PipelineBuilder) WithCostCalculator(c CostCalculator) *PipelineBuilder {
 	b.cost = c
+	return b
+}
+
+// WithTracer plugs in an OpenTelemetry tracer for span emission.
+// Without one, a noop tracer is used and no spans are recorded.
+func (b *PipelineBuilder) WithTracer(t trace.Tracer) *PipelineBuilder {
+	b.tracer = t
+	return b
+}
+
+// WithMeter plugs in an OpenTelemetry meter for counter and histogram emission.
+// Without one, a noop meter is used and no metrics are recorded.
+func (b *PipelineBuilder) WithMeter(m metric.Meter) *PipelineBuilder {
+	b.meter = m
+	return b
+}
+
+// WithCheckpoints enables mid-turn durability. See CheckpointStore for the
+// idempotency contract callers must honor for tools with side-effects.
+func (b *PipelineBuilder) WithCheckpoints(s CheckpointStore) *PipelineBuilder {
+	b.checkpoints = s
 	return b
 }
 
@@ -188,6 +219,19 @@ func (b *PipelineBuilder) Build() (*Engine, error) {
 	if cost == nil {
 		cost = noopCostCalculator{}
 	}
+	tracer := b.tracer
+	if tracer == nil {
+		tracer = tracenoop.NewTracerProvider().Tracer("")
+	}
+	meter := b.meter
+	if meter == nil {
+		meter = noop.NewMeterProvider().Meter("")
+	}
+
+	instruments, err := newInstruments(meter)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: failed to init metrics: %w", err)
+	}
 
 	return &Engine{
 		nodeRegistry:         b.nodeRegistry,
@@ -205,5 +249,9 @@ func (b *PipelineBuilder) Build() (*Engine, error) {
 		logger:               b.logger,
 		classifier:           classifier,
 		cost:                 cost,
+		tracer:               tracer,
+		meter:                meter,
+		instruments:          instruments,
+		checkpoints:          b.checkpoints,
 	}, nil
 }

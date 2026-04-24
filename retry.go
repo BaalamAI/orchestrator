@@ -3,6 +3,11 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ── Node execution modes ────────────────────────────────────────────
@@ -44,18 +49,38 @@ func (e *Engine) retryLoop(ctx context.Context, store StateStore, turn *Turn, ph
 			return nil, ctx.Err()
 		}
 
-		nodeResult, err := executor(ctx, store, turn, phase, entry, sharedCtx)
+		attemptCtx, attemptSpan := e.tracer.Start(ctx, "orchestrator.node.attempt",
+			trace.WithAttributes(
+				attribute.String("phase", phase),
+				attribute.Int("attempt", attempt),
+				attribute.Int("max_attempts", maxAttempts),
+			),
+		)
+
+		nodeResult, err := executor(attemptCtx, store, turn, phase, entry, sharedCtx)
 		if err == nil {
+			attemptSpan.End()
 			return nodeResult, nil
 		}
 
 		lastErr = err
 		ledger.record(err)
+		category := e.classifier.Classify(err)
+
+		attemptSpan.RecordError(err)
+		attemptSpan.SetAttributes(attribute.String("error.category", category.String()))
+		attemptSpan.SetStatus(codes.Error, err.Error())
+		attemptSpan.End()
+
+		e.instruments.retries.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("phase", phase),
+			attribute.String("category", category.String()),
+		))
 
 		// Permanent errors (auth, invalid input, context limit, circuit breaker open, …)
 		// short-circuit retries. The classifier owns this decision; swap in a custom
 		// ErrorClassifier to change which errors are treated as permanent.
-		if e.classifier.Classify(err) == CategoryPermanent {
+		if category == CategoryPermanent {
 			e.logWarn(ctx, "Permanent error, skipping retries", "phase", phase, "error", err)
 			break
 		}
@@ -108,6 +133,9 @@ func (e *Engine) commitNode(ctx context.Context, store StateStore, turn *Turn, p
 func (e *Engine) computeNode(ctx context.Context, store StateStore, turn *Turn, phase Phase, entry registeredNode, sharedCtx map[string]any) (*NodeResult, error) {
 	snapshot := NewSnapshot(store)
 	input := &NodeInput{Extra: make(map[string]any), SharedContext: sharedCtx}
+
+	// Inject tracer + meter so NewToolLoopNode closures can emit spans/metrics.
+	ctx = withToolLoopObservability(ctx, e.tracer, e.toolLoopMeter())
 
 	// Pre-agent hooks
 	for _, hook := range e.preAgentHooks {
