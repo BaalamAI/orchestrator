@@ -32,6 +32,7 @@ func (e *Engine) executeParallelPhases(ctx context.Context, store StateStore, tu
 		}
 		// Apply merged delta from parallel phases to store (single-threaded)
 		e.commitDelta(ctx, store, "parallel", &merged.Delta)
+		mergeSharedContext(sharedCtx, merged.SharedContext)
 	}
 
 	for _, phase := range sequential {
@@ -40,9 +41,19 @@ func (e *Engine) executeParallelPhases(ctx context.Context, store StateStore, tu
 			return nil, fmt.Errorf("error in %s agent: %w", phase, err)
 		}
 		mergeInto(merged, &mu, nr)
+		mergeSharedContext(sharedCtx, nr.SharedContext)
 	}
 
 	return merged, nil
+}
+
+func mergeSharedContext(dst, src map[string]any) {
+	if dst == nil {
+		return
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
 }
 
 // partitionPhases splits phases into concurrent and sequential groups based on
@@ -141,4 +152,3 @@ func eventPriority(e EventType) int {
 		return 0
 	}
 }
-

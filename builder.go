@@ -59,7 +59,7 @@ func (b *PipelineBuilder) WithLogger(l Logger) *PipelineBuilder {
 }
 
 // WithClassifier plugs in a concrete ErrorClassifier. Without one, the engine
-// falls back to noopClassifier which treats every error as CategoryPermanent.
+// falls back to noopClassifier which treats every non-nil error as transient.
 func (b *PipelineBuilder) WithClassifier(c ErrorClassifier) *PipelineBuilder {
 	b.classifier = c
 	return b

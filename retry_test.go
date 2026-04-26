@@ -292,3 +292,32 @@ func TestEngine_ParallelExecution_SharedContextIsIsolatedPerNode(t *testing.T) {
 	default:
 	}
 }
+
+func TestEngine_ParallelExecution_SharedContextFlowsToSequentialBatchNode(t *testing.T) {
+	var received map[string]any
+
+	producer := func(_ context.Context, _ orch.StateView, _ *orch.Turn, _ *orch.NodeInput) (*orch.NodeResult, error) {
+		return &orch.NodeResult{
+			Event:         orch.EventStepSuccess,
+			SharedContext: map[string]any{"from_parallel": "ready"},
+		}, nil
+	}
+	consumer := func(_ context.Context, _ orch.StateView, _ *orch.Turn, input *orch.NodeInput) (*orch.NodeResult, error) {
+		received = input.SharedContext
+		return &orch.NodeResult{Event: orch.EventWaitUser, Answer: "done"}, nil
+	}
+
+	engine := orch.NewPipelineBuilder().
+		WithSupervisor(&parallelSupervisor{phases: []orch.Phase{"producer", "consumer"}}).
+		RegisterConcurrentNode("producer", producer).
+		RegisterNode("consumer", consumer).
+		MustBuild()
+
+	_, err := engine.Run(context.Background(), store.NewMemory(), orch.NewTurn("c1", "hi"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := received["from_parallel"]; got != "ready" {
+		t.Fatalf("expected sequential node to receive parallel shared context, got %v", received)
+	}
+}
