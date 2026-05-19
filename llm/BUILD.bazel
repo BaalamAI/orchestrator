@@ -4,6 +4,7 @@ go_library(
     name = "llm",
     srcs = [
         "doc.go",
+        "multimodal.go",
         "ports.go",
         "toolloop.go",
     ],
