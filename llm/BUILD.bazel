@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "llm",
     srcs = [
+        "doc.go",
         "ports.go",
         "toolloop.go",
     ],
@@ -10,16 +11,21 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//lib/orchestrator",
-        "//lib/orchestrator/obs",
-        "@io_opentelemetry_go_otel//attribute",
-        "@io_opentelemetry_go_otel//codes",
-        "@io_opentelemetry_go_otel_trace//:trace",
+        "//lib/orchestrator/llm/react",
     ],
 )
 
 go_test(
     name = "llm_test",
-    srcs = ["toolloop_test.go"],
+    srcs = [
+        "example_test.go",
+        "toolloop_test.go",
+    ],
     embed = [":llm"],
-    deps = ["//lib/orchestrator"],
+    deps = [
+        "//lib/orchestrator",
+        "//lib/orchestrator/llm/llmtest",
+        "//lib/orchestrator/store",
+        "//lib/orchestrator/supervisor",
+    ],
 )

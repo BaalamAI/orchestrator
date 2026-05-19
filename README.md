@@ -410,9 +410,9 @@ por llave natural. Ver tambien `docs/adr-tool-idempotency.md`.
 
 ---
 
-## Tool loop LLM
+## Subsistema LLM (paquete `llm/`)
 
-El paquete `llm/` permite construir un `NodeFunc` con loop ReAct:
+El subpaquete `llm/` define los puertos LLM y un adapter ReAct que los convierte en `NodeFunc`:
 
 ```
 LLM completion
@@ -426,8 +426,39 @@ LLM completion
           +-- retorna NodeResult{Answer, Event}
 ```
 
-`NewToolLoopNode(client, opts)` no depende de un proveedor concreto. Los servicios consumidores
-adaptan OpenAI, Anthropic, Gemini u otro SDK al puerto `llm.Client`.
+### Puertos
+
+| Puerto | Para qué | Implementaciones de referencia |
+|--------|----------|--------------------------------|
+| `llm.Client` | Chat completion + tool calling (lo que `NewToolLoopNode` necesita) | `github.com/baalamai/llm-gemini`, `github.com/baalamai/llm-anthropic` |
+| `llm.StructuredClient` | Chat 1-shot con JSON schema, prompt caching y extended thinking | `github.com/baalamai/llm-gemini` v0.2+, `github.com/baalamai/llm-anthropic` v0.2+ |
+| `llm.Embedder` | Generación de embeddings (separado a propósito — Anthropic no tiene) | `github.com/baalamai/llm-gemini` |
+| `llm.Tool` | Capacidad invocable por el modelo | Definidas por el consumidor |
+
+`StructuredClient` embebe `Client` — un mismo adapter implementa ambos, y un consumidor que sólo necesita tool-loops puede tipar contra `Client` para no comprometerse con la API de schemas/caching/thinking.
+
+### Implementando un adapter de `Client`
+
+Un adapter mínimo son ~150 líneas. Dos cosas que los autores deben acertar:
+
+1. **Normalizar `StopReason`** a las constantes canónicas (`StopReasonEndTurn`, `StopReasonToolUse`, `StopReasonMaxTokens`). La ReAct loop branchea sobre eso — strings raw del proveedor rompen el loop silenciosamente. La tabla de mapping (Anthropic / OpenAI / Gemini) está documentada en `CompletionResponse` (ports.go).
+
+2. **Sintetizar IDs de tool calls** si el proveedor no los asigna nativamente (Gemini). El loop los usa para emparejar resultados con llamadas vía `ToolCallID`.
+
+Ver `llm/doc.go` y `llm/example_test.go` para detalles y un ejemplo ejecutable end-to-end.
+
+### Testing sin proveedor real
+
+El subpaquete `llm/llmtest/` exporta:
+
+- `ScriptedClient` — devuelve respuestas pre-construidas en orden.
+- `FakeClient` — una sola respuesta canned.
+- `RecordingClient` — envuelve otro Client y registra requests/responses.
+- `FakeTool` — Tool con resultado canned + lista de invocaciones.
+
+Suficiente para unit-testear cualquier nodo que envuelva `NewToolLoopNode` sin pegarle a un LLM real.
+
+### Tools
 
 Cada tool declara si es idempotente:
 
@@ -440,7 +471,7 @@ type ToolDefinition struct {
 }
 ```
 
-Ese flag documenta la expectativa del tool. El engine no lo enforza automaticamente.
+Ese flag documenta la expectativa del tool. El engine no lo enforza automáticamente.
 
 ---
 

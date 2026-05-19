@@ -7,10 +7,7 @@ import (
 	"time"
 
 	"github.com/baalamai/orchestrator"
-	"github.com/baalamai/orchestrator/obs"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
+	"github.com/baalamai/orchestrator/llm/react"
 )
 
 // ToolErrorPolicy controls how tool execution errors propagate in the ReAct loop.
@@ -59,6 +56,51 @@ type ToolLoopOptions struct {
 // ToolLoopOptions.MaxIterations. Classifiers may map this to CategoryPermanent.
 var ErrToolLoopMaxIterations = errors.New("tool loop: max iterations exceeded")
 
+// ── Context plumbing for view/turn ────────────────────────────────────
+//
+// llm.Tool.Invoke takes orchestrator.StateView and *orchestrator.Turn but
+// react.Tool.Invoke does not. NewToolLoopNode injects view/turn through
+// context before invoking react.RunLoop; the llm→react Tool adapter recovers
+// them and forwards them to the underlying llm.Tool. This keeps the react
+// package free of orchestrator FSM types.
+
+type viewCtxKey struct{}
+type turnCtxKey struct{}
+
+// ViewFromContext recovers the orchestrator.StateView that NewToolLoopNode
+// injected into ctx before invoking react.RunLoop. Returns (nil, false) when
+// the loop was driven directly via react.RunLoop without the wrapper.
+func ViewFromContext(ctx context.Context) (orchestrator.StateView, bool) {
+	v, ok := ctx.Value(viewCtxKey{}).(orchestrator.StateView)
+	return v, ok
+}
+
+// TurnFromContext recovers the orchestrator.Turn that NewToolLoopNode injected
+// into ctx before invoking react.RunLoop. Returns (nil, false) when the loop
+// was driven directly via react.RunLoop without the wrapper.
+func TurnFromContext(ctx context.Context) (*orchestrator.Turn, bool) {
+	t, ok := ctx.Value(turnCtxKey{}).(*orchestrator.Turn)
+	return t, ok
+}
+
+func withViewTurn(ctx context.Context, view orchestrator.StateView, turn *orchestrator.Turn) context.Context {
+	ctx = context.WithValue(ctx, viewCtxKey{}, view)
+	ctx = context.WithValue(ctx, turnCtxKey{}, turn)
+	return ctx
+}
+
+// llmToolAdapter wraps a llm.Tool as a react.Tool, recovering view/turn from
+// ctx that the NewToolLoopNode wrapper injected.
+type llmToolAdapter struct{ inner Tool }
+
+func (a llmToolAdapter) Definition() ToolDefinition { return a.inner.Definition() }
+
+func (a llmToolAdapter) Invoke(ctx context.Context, call ToolCall) (ToolResult, error) {
+	view, _ := ViewFromContext(ctx)
+	turn, _ := TurnFromContext(ctx)
+	return a.inner.Invoke(ctx, call, view, turn)
+}
+
 // NewToolLoopNode returns an orchestrator.NodeFunc that implements a ReAct-style loop:
 //
 //  1. Call the LLM with the current messages and registered tools.
@@ -70,25 +112,24 @@ var ErrToolLoopMaxIterations = errors.New("tool loop: max iterations exceeded")
 // Each iteration accumulates token usage in the returned NodeResult. State deltas
 // returned by tools are merged into NodeResult.Delta and applied by the engine
 // after the node completes.
+//
+// Internally this is a thin adapter over react.RunLoop: the ReAct loop, OTel
+// spans (orchestrator.llm, orchestrator.tool), and observability metrics live
+// in package react. NewToolLoopNode injects view/turn through context so the
+// llm.Tool.Invoke signature stays unchanged for existing tools.
 func NewToolLoopNode(client Client, opts ToolLoopOptions) orchestrator.NodeFunc {
 	if client == nil {
 		panic("orchestrator/llm: NewToolLoopNode requires a non-nil Client")
 	}
-	max := opts.MaxIterations
-	if max <= 0 {
-		max = 8
-	}
+
 	completionEvent := opts.EventOnComplete
 	if completionEvent == "" {
 		completionEvent = orchestrator.EventWaitUser
 	}
 
-	toolMap := make(map[string]Tool, len(opts.Tools))
-	toolDefs := make([]ToolDefinition, 0, len(opts.Tools))
+	tools := make([]react.Tool, 0, len(opts.Tools))
 	for _, t := range opts.Tools {
-		def := t.Definition()
-		toolMap[def.Name] = t
-		toolDefs = append(toolDefs, def)
+		tools = append(tools, llmToolAdapter{inner: t})
 	}
 
 	sysPrompt := opts.SystemPrompt
@@ -101,176 +142,43 @@ func NewToolLoopNode(client Client, opts ToolLoopOptions) orchestrator.NodeFunc 
 	}
 
 	return func(ctx context.Context, view orchestrator.StateView, turn *orchestrator.Turn, input *orchestrator.NodeInput) (*orchestrator.NodeResult, error) {
-		tracer := obs.TracerFromCtx(ctx)
-		o := obs.FromCtx(ctx)
-
-		result := &orchestrator.NodeResult{}
 		msgs := buildInitial(view, turn)
 		if input != nil && input.RAGContext != "" {
 			msgs = append(msgs, ChatMessage{Role: "user", Content: "### Contexto:\n" + input.RAGContext})
 		}
 
-		for iter := 0; iter < max; iter++ {
-			if err := ctx.Err(); err != nil {
-				return nil, err
+		loopRes, err := react.RunLoop(withViewTurn(ctx, view, turn), react.LoopOptions{
+			Client:        client,
+			Tools:         tools,
+			Model:         opts.Model,
+			System:        sysPrompt(view, turn),
+			Messages:      msgs,
+			Temperature:   opts.Temperature,
+			MaxTokens:     opts.MaxTokens,
+			MaxIterations: opts.MaxIterations,
+			OnToolError:   react.ToolErrorPolicy(opts.OnToolError),
+			OnLLMCall:     opts.OnLLMCall,
+			OnToolCall:    opts.OnToolCall,
+		})
+		if err != nil {
+			if errors.Is(err, react.ErrMaxIterations) {
+				return nil, fmt.Errorf("%w (phase=tool_loop, model=%s)", ErrToolLoopMaxIterations, opts.Model)
 			}
-
-			req := CompletionRequest{
-				Model:       opts.Model,
-				System:      sysPrompt(view, turn),
-				Messages:    msgs,
-				Tools:       toolDefs,
-				Temperature: opts.Temperature,
-				MaxTokens:   opts.MaxTokens,
-			}
-
-			resp, err := callLLM(ctx, tracer, o, client, req, opts.OnLLMCall, iter, opts.Model)
-			if err != nil {
-				return nil, fmt.Errorf("tool loop: llm call: %w", err)
-			}
-			accumulateUsage(result, resp.Usage)
-
-			if resp.StopReason != StopReasonToolUse || len(resp.ToolCalls) == 0 {
-				result.Answer = resp.Content
-				result.Event = completionEvent
-				return result, nil
-			}
-
-			msgs = append(msgs, ChatMessage{
-				Role:      "assistant",
-				Content:   resp.Content,
-				ToolCalls: resp.ToolCalls,
-			})
-
-			for _, call := range resp.ToolCalls {
-				toolMsg, toolErr := invokeToolCall(ctx, tracer, o, toolMap, call, view, turn, result, opts.OnToolCall)
-				if toolErr != nil && opts.OnToolError == ToolErrorPropagate {
-					return nil, toolErr
-				}
-				msgs = append(msgs, toolMsg)
-			}
+			return nil, fmt.Errorf("tool loop: %w", err)
 		}
 
-		return nil, fmt.Errorf("%w (phase=tool_loop, model=%s)", ErrToolLoopMaxIterations, opts.Model)
-	}
-}
-
-func callLLM(
-	ctx context.Context,
-	tracer trace.Tracer,
-	o *obs.Observability,
-	client Client,
-	req CompletionRequest,
-	hook func(context.Context, CompletionRequest, *CompletionResponse, time.Duration, error),
-	iter int,
-	model string,
-) (*CompletionResponse, error) {
-	ctx, span := tracer.Start(ctx, "orchestrator.llm",
-		trace.WithAttributes(
-			attribute.String("model", model),
-			attribute.Int("iteration", iter),
-			attribute.Int("messages", len(req.Messages)),
-			attribute.Int("tools", len(req.Tools)),
-		),
-	)
-	defer span.End()
-
-	start := time.Now()
-	resp, err := client.Complete(ctx, req)
-	dur := time.Since(start)
-
-	o.RecordLLMDuration(ctx, dur.Seconds()*1000, model)
-	if hook != nil {
-		hook(ctx, req, resp, dur, err)
-	}
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	span.SetAttributes(
-		attribute.String("stop_reason", resp.StopReason),
-		attribute.Int("tool_calls", len(resp.ToolCalls)),
-	)
-	if resp.Usage != nil {
-		span.SetAttributes(
-			attribute.Int64("usage.prompt_tokens", int64(resp.Usage.PromptTokens)),
-			attribute.Int64("usage.completion_tokens", int64(resp.Usage.CompletionTokens)),
-		)
-	}
-	return resp, nil
-}
-
-func invokeToolCall(
-	ctx context.Context,
-	tracer trace.Tracer,
-	o *obs.Observability,
-	toolMap map[string]Tool,
-	call ToolCall,
-	view orchestrator.StateView,
-	turn *orchestrator.Turn,
-	result *orchestrator.NodeResult,
-	hook func(context.Context, ToolCall, *ToolResult, time.Duration, error),
-) (ChatMessage, error) {
-	ctx, span := tracer.Start(ctx, "orchestrator.tool",
-		trace.WithAttributes(
-			attribute.String("tool.name", call.Name),
-			attribute.String("tool.call_id", call.ID),
-		),
-	)
-	defer span.End()
-
-	tool, ok := toolMap[call.Name]
-	if !ok {
-		msg := fmt.Sprintf("unknown tool: %s", call.Name)
-		span.SetStatus(codes.Error, msg)
-		o.RecordToolCall(ctx, call.Name, "unknown")
-		if hook != nil {
-			hook(ctx, call, &ToolResult{Content: msg, IsError: true}, 0, nil)
+		result := &orchestrator.NodeResult{
+			Answer: loopRes.Answer,
+			Usage:  loopRes.Usage,
+			Event:  completionEvent,
 		}
-		return ChatMessage{Role: "tool", ToolCallID: call.ID, Content: msg}, nil
-	}
-	span.SetAttributes(attribute.Bool("tool.idempotent", tool.Definition().Idempotent))
-
-	start := time.Now()
-	toolRes, err := tool.Invoke(ctx, call, view, turn)
-	dur := time.Since(start)
-
-	o.RecordToolDuration(ctx, dur.Seconds()*1000, call.Name)
-
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		o.RecordToolCall(ctx, call.Name, "error")
-		if hook != nil {
-			hook(ctx, call, nil, dur, err)
+		for _, inv := range loopRes.ToolResults {
+			if inv.Result.Delta != nil {
+				result.Delta.Merge(inv.Result.Delta)
+			}
 		}
-		return ChatMessage{
-			Role:       "tool",
-			ToolCallID: call.ID,
-			Content:    fmt.Sprintf("tool %s failed: %v", call.Name, err),
-		}, err
+		return result, nil
 	}
-
-	outcome := "ok"
-	if toolRes.IsError {
-		outcome = "error"
-	}
-	o.RecordToolCall(ctx, call.Name, outcome)
-	if hook != nil {
-		hook(ctx, call, &toolRes, dur, nil)
-	}
-
-	if toolRes.Delta != nil {
-		result.Delta.Merge(toolRes.Delta)
-	}
-	accumulateUsage(result, toolRes.Usage)
-
-	return ChatMessage{
-		Role:       "tool",
-		ToolCallID: call.ID,
-		Content:    toolRes.Content,
-	}, nil
 }
 
 // defaultInitialMessages converts the view's conversation history to ChatMessages.
@@ -288,14 +196,4 @@ func defaultInitialMessages(view orchestrator.StateView, turn *orchestrator.Turn
 		out = append(out, ChatMessage{Role: "user", Content: turn.Text})
 	}
 	return out
-}
-
-func accumulateUsage(result *orchestrator.NodeResult, src *orchestrator.Usage) {
-	if src == nil {
-		return
-	}
-	if result.Usage == nil {
-		result.Usage = &orchestrator.Usage{}
-	}
-	result.Usage.Add(src)
 }

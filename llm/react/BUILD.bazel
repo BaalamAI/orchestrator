@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "react",
+    srcs = [
+        "doc.go",
+        "loop.go",
+        "tool.go",
+        "types.go",
+    ],
+    importpath = "github.com/baalamai/orchestrator/llm/react",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//lib/orchestrator",
+        "//lib/orchestrator/obs",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel//codes",
+        "@io_opentelemetry_go_otel_trace//:trace",
+    ],
+)
+
+go_test(
+    name = "react_test",
+    srcs = ["loop_test.go"],
+    embed = [":react"],
+    deps = ["//lib/orchestrator"],
+)

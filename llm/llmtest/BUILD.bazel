@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "llmtest",
+    srcs = ["llmtest.go"],
+    importpath = "github.com/baalamai/orchestrator/llm/llmtest",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//lib/orchestrator",
+        "//lib/orchestrator/llm",
+    ],
+)

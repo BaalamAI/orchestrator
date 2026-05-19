@@ -1,10 +1,3 @@
-// Package llm contains the LLM subsystem: outbound ports (Client, Tool) and the
-// ReAct-style tool-loop adapter (NewToolLoopNode) that wraps them into an
-// orchestrator.NodeFunc.
-//
-// These ports are local to the tool-loop subsystem — the core Engine does not
-// depend on them. Concrete Client adapters (Anthropic, OpenAI, Gemini) live in
-// the consumer services.
 package llm
 
 import (
@@ -12,100 +5,213 @@ import (
 	"encoding/json"
 
 	"github.com/baalamai/orchestrator"
+	"github.com/baalamai/orchestrator/llm/react"
 )
 
-// Client is the outbound port for chat-completion calls with optional tool use.
-// Adapters wrap provider SDKs and translate tool_use / tool_calls to the canonical
-// CompletionResponse format.
-type Client interface {
-	Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error)
-}
+// ── Re-exports from the react subpackage ──────────────────────────────
+//
+// These aliases preserve the existing llm.X API while the canonical
+// definitions live in react/. Adapters and consumers can use either name.
 
-// CompletionRequest is the canonical input to an LLM completion call.
-type CompletionRequest struct {
-	// Model is the provider-specific model identifier (e.g. "claude-opus-4-7").
-	Model string
-	// System is the system prompt; empty string means no system prompt.
-	System string
-	// Messages is the conversation history plus tool results.
-	Messages []ChatMessage
-	// Tools is the list of tools the model may invoke.
-	Tools []ToolDefinition
-	// Temperature controls sampling; 0 means deterministic.
-	Temperature float64
-	// MaxTokens caps the completion length; 0 means provider default.
-	MaxTokens int32
-}
+// Client is the outbound port for chat-completion calls with optional tool
+// use. See react.Client for the full doc.
+type Client = react.Client
+
+// CompletionRequest is the canonical input to an LLM completion call. See
+// react.CompletionRequest for the full doc, including the
+// StableInstruction / DynamicContext / Cache / Thinking semantics.
+type CompletionRequest = react.CompletionRequest
 
 // ChatMessage is a single message in the conversation passed to the LLM.
-type ChatMessage struct {
-	// Role is one of: "user", "assistant", "tool".
-	Role string
-	// Content is the text content (may be empty if ToolCalls is set).
-	Content string
-	// ToolCalls is set when Role=="assistant" and the model requested tools.
-	ToolCalls []ToolCall
-	// ToolCallID is set when Role=="tool" and identifies which call this answers.
-	ToolCallID string
-}
+type ChatMessage = react.ChatMessage
 
-// CompletionResponse is the canonical LLM response.
-type CompletionResponse struct {
-	// Content is the text portion of the assistant response.
-	Content string
-	// ToolCalls is set when StopReason == "tool_use".
-	ToolCalls []ToolCall
-	// StopReason is one of: "end_turn", "tool_use", "max_tokens", "stop_sequence".
-	StopReason string
-	// Usage holds tokens consumed by this call.
-	Usage *orchestrator.Usage
-}
-
-// StopReason constants used by the ToolLoopNode to drive its state machine.
-const (
-	StopReasonEndTurn   = "end_turn"
-	StopReasonToolUse   = "tool_use"
-	StopReasonMaxTokens = "max_tokens"
-)
+// CompletionResponse is the canonical LLM response. See react.CompletionResponse.
+type CompletionResponse = react.CompletionResponse
 
 // ToolCall is a single tool invocation requested by the LLM.
-type ToolCall struct {
-	// ID uniquely identifies this call within the response.
-	ID string
-	// Name is the tool name (must match a registered Tool.Definition().Name).
-	Name string
-	// Input is the JSON-encoded arguments for the tool.
-	Input json.RawMessage
-}
+type ToolCall = react.ToolCall
 
-// Tool is a callable exposed to the LLM by a ToolLoopNode.
+// ToolDefinition describes a tool to the LLM.
+type ToolDefinition = react.ToolDefinition
+
+// ToolResult is the output of a Tool.Invoke.
+type ToolResult = react.ToolResult
+
+// CacheHint expresses the caller's caching preference.
+type CacheHint = react.CacheHint
+
+// ThinkingHint enables extended thinking / reasoning.
+type ThinkingHint = react.ThinkingHint
+
+// StopReason constants used by the ReAct loop. Adapters translate
+// provider-specific strings into these canonical values.
+const (
+	StopReasonEndTurn   = react.StopReasonEndTurn
+	StopReasonToolUse   = react.StopReasonToolUse
+	StopReasonMaxTokens = react.StopReasonMaxTokens
+)
+
+// CacheHint values. CacheNone disables prompt caching entirely (zero value).
+const (
+	CacheNone  = react.CacheNone
+	CacheShort = react.CacheShort
+	CacheLong  = react.CacheLong
+)
+
+// ── Tool (orchestrator-aware variant) ─────────────────────────────────
+
+// Tool is a callable exposed to the LLM by NewToolLoopNode. Unlike
+// react.Tool, this variant takes orchestrator.StateView and *orchestrator.Turn
+// so tools that need access to per-turn state can read them directly.
+//
+// NewToolLoopNode wraps every llm.Tool as a react.Tool internally, injecting
+// view and turn through context.
 type Tool interface {
-	// Definition returns the schema and metadata used to advertise this tool to the LLM.
+	// Definition returns the schema and metadata used to advertise this tool
+	// to the LLM.
 	Definition() ToolDefinition
 	// Invoke executes the tool with the call's arguments and returns a result.
 	Invoke(ctx context.Context, call ToolCall, view orchestrator.StateView, turn *orchestrator.Turn) (ToolResult, error)
 }
 
-// ToolDefinition describes a tool to the LLM.
-type ToolDefinition struct {
-	// Name is the tool identifier; must be unique within a ToolLoopNode.
-	Name string
-	// Description is the human-readable description shown to the LLM.
-	Description string
-	// InputSchema is the JSON Schema for tool arguments.
-	InputSchema json.RawMessage
-	// Idempotent indicates that re-invoking this tool with the same args is safe.
-	Idempotent bool
+// ── Embedder ──────────────────────────────────────────────────────────
+
+// Embedder is an outbound port for text embedding. It is intentionally
+// separate from Client: not every provider exposes embeddings (Anthropic does
+// not), and consumers that only need embeddings (vector indexing, semantic
+// search) should not be forced to depend on a chat-completion adapter.
+//
+// Adapters that support both Client and Embedder typically expose them as two
+// distinct constructors (e.g. NewClient / NewEmbedder in lib/llm-gemini)
+// backed by a shared HTTP client.
+type Embedder interface {
+	Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error)
 }
 
-// ToolResult is the output of a Tool.Invoke.
-type ToolResult struct {
-	// Content is the text returned to the LLM as the tool's output.
-	Content string
-	// Delta contains optional state mutations to apply after the tool runs.
-	Delta *orchestrator.StateDelta
-	// Usage is optional token usage consumed by this tool (e.g. RAG embedding calls).
+// EmbedRequest is the canonical input to an embedding call.
+type EmbedRequest struct {
+	// Model is the provider-specific embedding model id (e.g. "text-embedding-004").
+	Model string
+	// Texts is the batch of inputs to embed; adapters preserve order in the output.
+	Texts []string
+	// TaskType is an optional hint for asymmetric embedding models. Common values:
+	// "RETRIEVAL_QUERY", "RETRIEVAL_DOCUMENT", "SEMANTIC_SIMILARITY",
+	// "CLASSIFICATION", "CLUSTERING". Adapters ignore unsupported values.
+	TaskType string
+}
+
+// EmbedResponse is the canonical embedding response.
+type EmbedResponse struct {
+	// Vectors holds one embedding per input text, in the same order as the request.
+	Vectors [][]float32
+	// Usage is the token usage reported by the provider (may be nil if unsupported).
 	Usage *orchestrator.Usage
-	// IsError marks the content as an error message to be reported to the LLM.
-	IsError bool
+}
+
+// ── StructuredClient ──────────────────────────────────────────────────
+
+// StructuredClient is the outbound port for 1-shot completion calls with
+// optional structured output (JSON schema), prompt caching, and extended
+// thinking.
+//
+// A StructuredClient is also a Client — implementers expose both surfaces
+// because most consumers (form agents, capture extractors) want to fall back
+// to plain Complete when they don't need a schema. The two-method split keeps
+// Client minimal for tool-loop callers that never need schemas or caching.
+//
+// Use StructuredClient when:
+//   - You need the model to return JSON matching a known schema.
+//   - You want to take advantage of provider-side prompt caching
+//     (StableInstruction + Cache hint).
+//   - You need extended thinking budgets (Anthropic) or thinking levels
+//     (Gemini).
+//
+// Use the plain Client when:
+//   - You're running a ReAct tool loop (NewToolLoopNode requires Client, not
+//     StructuredClient — schemas conflict with native tool calling).
+//   - You only need a plain text response.
+type StructuredClient interface {
+	Client
+	CompleteStructured(ctx context.Context, req StructuredRequest) (*StructuredResponse, error)
+}
+
+// StructuredRequest is the canonical input to a structured completion call.
+//
+// System / StableInstruction split:
+//
+//   - When StableInstruction is set, it is treated as the system prompt AND
+//     marked cacheable (subject to Cache); DynamicContext is prepended as a
+//     user-role message so cache markers stay valid across turns. System is
+//     ignored.
+//   - When StableInstruction is empty, System is used as the system prompt with
+//     no cache marker.
+//
+// Mutual exclusivity is enforced by precedence (StableInstruction wins);
+// supplying both is allowed but the adapter will not concatenate them.
+type StructuredRequest struct {
+	// Model is the provider-specific model identifier.
+	Model string
+	// Messages is the conversation history. Tool-use messages are not supported
+	// here — use Client.Complete for tool loops.
+	Messages []ChatMessage
+	// Temperature controls sampling; 0 means deterministic.
+	Temperature float64
+	// MaxTokens caps the completion length; 0 means provider default.
+	MaxTokens int32
+	// TopP enables nucleus sampling; 0 means provider default.
+	TopP float64
+	// TopK enables top-k sampling; 0 means provider default.
+	TopK int32
+
+	// System is the system prompt. Used only when StableInstruction is empty.
+	System string
+
+	// StableInstruction is the cacheable, turn-invariant portion of the system
+	// prompt. When non-empty, the adapter uses this AS the system prompt and
+	// (if Cache != CacheNone) applies the provider's cache marker to it.
+	StableInstruction string
+
+	// DynamicContext is the per-turn, never-cached prefix. Adapters inject it
+	// as a user-role message prepended to Messages so cache markers on the
+	// stable prefix remain valid across turns.
+	DynamicContext string
+
+	// ResponseSchema enforces structured output. The adapter translates this
+	// to the provider's preferred mechanism (genai responseSchema, Anthropic
+	// synthetic tool, OpenAI response_format).
+	ResponseSchema json.RawMessage
+
+	// ResponseMIMEType is an optional output format hint (e.g. "application/json").
+	// Honored by providers with native MIME selection; ignored elsewhere.
+	ResponseMIMEType string
+
+	// Cache controls prompt-cache retention. CacheNone disables caching entirely.
+	Cache CacheHint
+
+	// Thinking enables extended thinking. nil disables it.
+	Thinking *ThinkingHint
+}
+
+// StructuredResponse is the canonical structured-completion response.
+//
+// Unlike CompletionResponse, this carries no ToolCalls — structured calls are
+// single-shot and use the response Content (typically JSON when
+// ResponseSchema is set). Use Client.Complete for tool-calling flows.
+type StructuredResponse struct {
+	// Content is the model's response text (the JSON when ResponseSchema is set).
+	Content string
+	// StopReason is the canonical termination reason; see the mapping table
+	// on CompletionResponse.
+	StopReason string
+	// Usage is the token usage for this call.
+	Usage *orchestrator.Usage
+	// Thinking holds the model's chain-of-thought when extended thinking is
+	// enabled.
+	Thinking string
+	// CacheCreated is the number of input tokens written to the prompt cache
+	// by this call (cost of seeding the cache).
+	CacheCreated int32
+	// CacheRead is the number of input tokens served from the prompt cache
+	// by this call (savings).
+	CacheRead int32
 }
