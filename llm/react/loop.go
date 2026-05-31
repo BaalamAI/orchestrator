@@ -89,7 +89,11 @@ type LoopResult struct {
 }
 
 // ErrMaxIterations is returned when the LLM keeps requesting tools past
-// LoopOptions.MaxIterations.
+// LoopOptions.MaxIterations. When it is returned, RunLoop also returns the
+// partial LoopResult accumulated up to that point (Messages and ToolResults
+// populated, Answer empty) so callers can salvage the work already done
+// instead of discarding it. Callers that do not want partial results should
+// keep ignoring the result on a non-nil error.
 var ErrMaxIterations = errors.New("react: max iterations exceeded")
 
 // RunLoop drives a ReAct-style tool-calling loop until the LLM returns a
@@ -165,7 +169,8 @@ func RunLoop(ctx context.Context, opts LoopOptions) (*LoopResult, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("%w (model=%s)", ErrMaxIterations, opts.Model)
+	result.Messages = msgs
+	return result, fmt.Errorf("%w (model=%s)", ErrMaxIterations, opts.Model)
 }
 
 func callLLM(

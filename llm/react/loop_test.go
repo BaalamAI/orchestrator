@@ -237,7 +237,7 @@ func TestRunLoop_MaxIterations(t *testing.T) {
 	}
 	client := &scriptedClient{responses: responses}
 
-	_, err := RunLoop(context.Background(), LoopOptions{
+	res, err := RunLoop(context.Background(), LoopOptions{
 		Client:        client,
 		Model:         "t",
 		Tools:         []Tool{loopTool},
@@ -248,6 +248,14 @@ func TestRunLoop_MaxIterations(t *testing.T) {
 	}
 	if len(loopTool.calls) != 3 {
 		t.Errorf("expected 3 tool invocations (bounded by MaxIterations), got %d", len(loopTool.calls))
+	}
+	// On max-iterations RunLoop returns the partial result it gathered so
+	// callers can salvage the work instead of discarding it.
+	if res == nil {
+		t.Fatal("expected partial result alongside ErrMaxIterations, got nil")
+	}
+	if len(res.ToolResults) != 3 {
+		t.Errorf("expected 3 tool results in partial output, got %d", len(res.ToolResults))
 	}
 }
 
