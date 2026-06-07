@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/baalamai/orchestrator"
@@ -25,6 +26,13 @@ const (
 	// fatal tool errors.
 	ToolErrorPropagate
 )
+
+// defaultEmptyToolResultText is the language-neutral backstop substituted when
+// a tool returns success with blank Content. A blank tool result feeds an empty
+// message back to the LLM, which then re-issues the same call — burning the
+// whole iteration budget per turn. Callers override the copy via
+// [LoopOptions.EmptyToolResultText]; this default only guarantees non-empty.
+const defaultEmptyToolResultText = "(no result)"
 
 // LoopOptions configures a single RunLoop invocation.
 type LoopOptions struct {
@@ -63,6 +71,11 @@ type LoopOptions struct {
 	OnLLMCall func(ctx context.Context, req CompletionRequest, resp *CompletionResponse, dur time.Duration, err error)
 	// OnToolCall is invoked after each tool invocation (even on error).
 	OnToolCall func(ctx context.Context, call ToolCall, result *ToolResult, dur time.Duration, err error)
+	// EmptyToolResultText is substituted as a tool's Content when the tool
+	// returns success (IsError=false) with blank Content. This backstops the
+	// re-fetch loop a blank result would otherwise trigger. When unset, a
+	// language-neutral default is used.
+	EmptyToolResultText string
 }
 
 // ToolInvocation records a single tool execution emitted during RunLoop.
@@ -157,8 +170,12 @@ func RunLoop(ctx context.Context, opts LoopOptions) (*LoopResult, error) {
 			ToolCalls: resp.ToolCalls,
 		})
 
+		emptyText := opts.EmptyToolResultText
+		if emptyText == "" {
+			emptyText = defaultEmptyToolResultText
+		}
 		for _, call := range resp.ToolCalls {
-			toolMsg, inv, toolErr := invokeToolCall(ctx, tracer, o, toolMap, call, opts.OnToolCall)
+			toolMsg, inv, toolErr := invokeToolCall(ctx, tracer, o, toolMap, call, opts.OnToolCall, emptyText)
 			result.ToolResults = append(result.ToolResults, inv)
 			accumulateUsage(result, inv.Result.Usage)
 			if toolErr != nil && opts.OnToolError == ToolErrorPropagate {
@@ -226,6 +243,7 @@ func invokeToolCall(
 	toolMap map[string]Tool,
 	call ToolCall,
 	hook func(context.Context, ToolCall, *ToolResult, time.Duration, error),
+	emptyText string,
 ) (ChatMessage, ToolInvocation, error) {
 	ctx, span := tracer.Start(ctx, "orchestrator.tool",
 		trace.WithAttributes(
@@ -278,8 +296,17 @@ func invokeToolCall(
 	}
 
 	outcome := "ok"
-	if toolRes.IsError {
+	switch {
+	case toolRes.IsError:
 		outcome = "error"
+	case strings.TrimSpace(toolRes.Content) == "":
+		// A blank, non-error result feeds an empty message back to the LLM,
+		// which re-issues the same call until MaxIterations — wasting the turn.
+		// Substitute a non-empty placeholder so the loop makes progress, and
+		// flag the anomaly (the tool returning blank is a bug to fix upstream).
+		outcome = "empty"
+		span.AddEvent("react.empty_tool_content")
+		toolRes.Content = emptyText
 	}
 	o.RecordToolCall(ctx, call.Name, outcome)
 	if hook != nil {

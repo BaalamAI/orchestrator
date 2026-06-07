@@ -448,3 +448,94 @@ func TestRunLoop_RespectsContextCancellation(t *testing.T) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }
+
+// toolMsgContent returns the Content of the tool-result message for callID in
+// req's history, or "" if absent.
+func toolMsgContent(req CompletionRequest, callID string) string {
+	for _, m := range req.Messages {
+		if m.Role == "tool" && m.ToolCallID == callID {
+			return m.Content
+		}
+	}
+	return ""
+}
+
+// TestRunLoop_EmptyToolContent_DefaultBackstop: a tool returning blank Content
+// without an error must NOT feed an empty message back to the LLM (which would
+// trigger a re-fetch loop). The loop substitutes the default placeholder.
+func TestRunLoop_EmptyToolContent_DefaultBackstop(t *testing.T) {
+	blank := &scriptedTool{name: "blank", result: ToolResult{Content: ""}}
+	client := &scriptedClient{responses: []CompletionResponse{
+		{StopReason: StopReasonToolUse, ToolCalls: []ToolCall{{ID: "c1", Name: "blank"}}},
+		{Content: "done", StopReason: StopReasonEndTurn},
+	}}
+
+	res, err := RunLoop(context.Background(), LoopOptions{
+		Client: client,
+		Model:  "t",
+		Tools:  []Tool{blank},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The tool is invoked exactly once — the backstop terminates the loop
+	// instead of letting the LLM re-call it.
+	if len(blank.calls) != 1 {
+		t.Fatalf("expected tool invoked once, got %d", len(blank.calls))
+	}
+	// The second LLM call must see the placeholder, never an empty tool message.
+	got := toolMsgContent(client.calls[1], "c1")
+	if got != defaultEmptyToolResultText {
+		t.Errorf("expected tool message %q, got %q", defaultEmptyToolResultText, got)
+	}
+	// The recorded invocation carries the substituted content, not blank.
+	if res.ToolResults[0].Result.Content != defaultEmptyToolResultText {
+		t.Errorf("expected ToolResults[0].Content=%q, got %q", defaultEmptyToolResultText, res.ToolResults[0].Result.Content)
+	}
+}
+
+// TestRunLoop_EmptyToolContent_CustomText: EmptyToolResultText overrides the
+// default placeholder.
+func TestRunLoop_EmptyToolContent_CustomText(t *testing.T) {
+	const custom = "No se encontró información para esta consulta."
+	blank := &scriptedTool{name: "blank", result: ToolResult{Content: "   "}} // whitespace counts as blank
+	client := &scriptedClient{responses: []CompletionResponse{
+		{StopReason: StopReasonToolUse, ToolCalls: []ToolCall{{ID: "c1", Name: "blank"}}},
+		{Content: "done", StopReason: StopReasonEndTurn},
+	}}
+
+	_, err := RunLoop(context.Background(), LoopOptions{
+		Client:              client,
+		Model:               "t",
+		Tools:               []Tool{blank},
+		EmptyToolResultText: custom,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := toolMsgContent(client.calls[1], "c1"); got != custom {
+		t.Errorf("expected tool message %q, got %q", custom, got)
+	}
+}
+
+// TestRunLoop_ErrorResultNotBackstopped: an IsError result with blank Content
+// is NOT substituted — error reporting owns that path.
+func TestRunLoop_ErrorResultNotBackstopped(t *testing.T) {
+	errTool := &scriptedTool{name: "bad", result: ToolResult{Content: "boom", IsError: true}}
+	client := &scriptedClient{responses: []CompletionResponse{
+		{StopReason: StopReasonToolUse, ToolCalls: []ToolCall{{ID: "c1", Name: "bad"}}},
+		{Content: "done", StopReason: StopReasonEndTurn},
+	}}
+
+	res, err := RunLoop(context.Background(), LoopOptions{
+		Client: client,
+		Model:  "t",
+		Tools:  []Tool{errTool},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.ToolResults[0].Result.Content != "boom" {
+		t.Errorf("error content must be preserved verbatim, got %q", res.ToolResults[0].Result.Content)
+	}
+}
